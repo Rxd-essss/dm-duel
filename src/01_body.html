@@ -1,0 +1,257 @@
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<!-- ================= HUD ================= -->
+<div id="hud" class="hide">
+  <div id="wind" class="panel"><div class="arw" id="windArw">&#10148;</div><div class="txt" id="windTxt">ВЕТЕР 0.0</div></div>
+  <div id="objective" class="panel">DM_DUEL v3 &nbsp;•&nbsp; ДУЭЛЬ ДО 20 ФРАГОВ</div>
+
+  <div id="score" class="panel">
+    <div class="s blu" id="scBlu">0</div>
+    <div class="mid"><span id="scTime">0:00</span><span style="font-size:9px">ФРАГИ</span></div>
+    <div class="s red" id="scRed">0</div>
+  </div>
+  <div id="feed"></div>
+
+  <div id="hp" class="panel"><div class="cross"></div><div><div class="lbl">ЗДОРОВЬЕ</div><div id="hpNum">100</div></div></div>
+  <div id="hpBarWrap"><div id="hpBar"></div></div>
+
+  <div id="ammo" class="panel"><div id="ammoName">МАТЧЕВЫЙ</div><div id="ammoNum">5<small>/45</small></div><div id="ammoCd">ОТКАТ</div></div>
+  <!-- пояс: у каждого типа своя заливка отката (.cd) и остаток секунд (.cdt) -->
+  <div id="ammoBelt">
+    <div class="slot a1 act" data-a="0"><div class="cd" id="cdF0"></div><div class="k">1</div><div class="n">МАТЧ</div><div class="cdt" id="cdT0"></div></div>
+    <div class="slot a2" data-a="1"><div class="cd" id="cdF1"></div><div class="k">2</div><div class="n">ФУГАС</div><div class="cdt" id="cdT1"></div></div>
+    <div class="slot a3" data-a="2"><div class="cd" id="cdF2"></div><div class="k">3</div><div class="n">ЗАЖИГ</div><div class="cdt" id="cdT2"></div></div>
+  </div>
+
+  <div id="reload" class="hide"><div class="t" id="reloadTxt">ПЕРЕЗАРЯДКА</div><div class="bar"><div class="fill" id="reloadFill"></div></div></div>
+  <div id="status"></div>
+  <div id="chargeWrap"><div class="bar"><div id="chargeFill"></div></div><div class="cap" id="chargeCap">ЗАРЯД</div></div>
+  <div id="stam"><div id="stamFill"></div></div>
+  <div id="dash" class="ready"><div class="cap">РЫВОК</div><div id="dashFill"></div></div>
+
+  <div id="xh" class="a1"><div class="h" id="xhU"></div><div class="h" id="xhD"></div><div class="v" id="xhL"></div><div class="v" id="xhR"></div><div class="dot"></div></div>
+  <div id="aimZone"><div id="aimOut"></div><div id="aimIn"></div><div id="aimCap"></div></div>
+  <div id="hitmark"><i></i><i></i></div>
+  <div id="dirs"></div>
+  <div id="dmgvig"></div>
+  <div id="lowhp"></div>
+  <div id="burnvig"></div>
+  <div id="toast"></div>
+  <div id="dead"><div class="t">ВАС УБИЛИ</div><div class="s" id="deadSub">РЕСПАВН ЧЕРЕЗ 3</div></div>
+
+  <!-- СЕТЬ. Только чтение: pointer-events у #hud намеренно выключены, и
+       возвращать их здесь нечему — кликать в табло и в строке пинга нечего. -->
+  <div id="netHud" class="hide">
+    <div id="netPing" class="panel">ПИНГ —</div>
+    <div id="netTeams" class="panel">
+      <div class="nt blu"><span>BLU</span><b id="netScBlu">0</b></div>
+      <div class="nt red"><span>RED</span><b id="netScRed">0</b></div>
+    </div>
+  </div>
+
+  <!-- табло: удерживать Tab -->
+  <div id="netBoard" class="hide">
+    <div class="nbCard panel">
+      <div class="nbHead"><span id="netBoardTitle">ТАБЛО · ДО 20 ФРАГОВ</span><span id="netBoardBots">БОТОВ: 0</span></div>
+      <div class="nbCols"><span>ИГРОК</span><span>КОМАНДА</span><span>ФРАГИ</span><span>СМЕРТИ</span><span>ПИНГ</span></div>
+      <div id="netBoardBody"></div>
+      <div class="nbFoot">Попадания засчитывает стреляющий, сервер лишь проверяет заявки: игра рассчитана на бой с друзьями, а не на защиту от читеров.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= ОПТИКА ================= -->
+<div id="scope">
+  <div id="lens"></div>
+  <svg id="retSvg" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+  <div id="lensGlare"></div>
+  <div id="rangeTxt">—</div>
+  <div id="scopeInfo"></div>
+</div>
+
+<!-- ================= БРИФИНГ ================= -->
+<div id="menu" class="screen">
+  <div class="card panel">
+    <div class="head">
+      <h1>DM_<span>DUEL</span> v3</h1>
+      <div class="sub">ДУЭЛЬ СНАЙПЕРОВ &nbsp;•&nbsp; BLU vs RED &nbsp;•&nbsp; ЯРУСЫ, МОСТКИ, РУНЫ</div>
+    </div>
+    <div class="body">
+      <div>
+        <h2 class="sec">Боекомплект</h2>
+        <div class="ammoCard a1"><div class="n" style="color:var(--a1)">1 · МАТЧЕВЫЙ<em>БЕЗ ОТКАТА</em></div>
+          <div class="d">Эталонная баллистика: высокая скорость, минимальное падение и снос ветром.
+            <b>Единственный тип с полным критом в голову</b> — если нужен размен один в один, стреляйте им.</div>
+          <div class="stat" id="s1"></div></div>
+        <div class="ammoCard a2"><div class="n" style="color:var(--a2)">2 · ФУГАСНЫЙ<em>ОТКАТ 2.5 С</em></div>
+          <div class="d">Подрыв при попадании. <b>Крита нет вообще</b> — в голову идёт обычный урон.
+            Работает площадью: максимум в эпицентре, дальше урон падает, за укрытием режется почти вдвое.
+            Тяжёлая пуля заметно проседает — берите выше. Задача — выкурить с точки, а не убить с одного.</div>
+          <div class="stat" id="s2"></div></div>
+        <div class="ammoCard a3"><div class="n" style="color:var(--a3)">3 · ЗАЖИГАТЕЛЬНЫЙ<em>ОТКАТ 5 С</em></div>
+          <div class="d">Прямой урон слабый, но цель <b>горит</b> и продолжает терять здоровье, даже уйдя за угол.
+            Промах оставляет очаг огня — перекрывает подход и лестницу. Самый длинный откат: пять секунд
+            пояс держит его закрытым, следите за заливкой слота.</div>
+          <div class="stat" id="s3"></div></div>
+      </div>
+      <div>
+        <h2 class="sec">Управление</h2>
+        <div class="rows">
+          <div class="row"><span>Движение</span><b><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></b></div>
+          <div class="row"><span>Ускорение</span><b><kbd>Shift</kbd></b></div>
+          <div class="row"><span>Присесть / подкат в беге</span><b><kbd>Ctrl</kbd> / <kbd>C</kbd></b></div>
+          <div class="row"><span>Прыжок, доп. прыжок в воздухе</span><b><kbd>Space</kbd></b></div>
+          <div class="row"><span>Подтянуться на уступ</span><b><kbd>Space</kbd> у стены</b></div>
+          <div class="row"><span>Магический рывок</span><b class="arc"><kbd>Q</kbd></b></div>
+          <div class="row"><span>Лестница / трос</span><b><kbd>W</kbd> в зоне, <kbd>Space</kbd> — спрыгнуть</b></div>
+          <div class="row"><span>Выстрел</span><b>ЛКМ</b></div>
+          <div class="row"><span>Оптика</span><b>ПКМ</b></div>
+          <div class="row"><span>Кратность</span><b>колесо в оптике</b></div>
+          <div class="row"><span>Задержать дыхание</span><b><kbd>Shift</kbd> в оптике</b></div>
+          <div class="row"><span>Тип патрона</span><b><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> / колесо вне оптики</b></div>
+          <div class="row"><span>Перезарядка</span><b><kbd>R</kbd></b></div>
+          <div class="row"><span>Пауза</span><b><kbd>Esc</kbd></b></div>
+        </div>
+        <h2 class="sec" style="margin-top:14px">Баллистика и откаты</h2>
+        <div class="rows">
+          <div class="row"><span>Пуля летит по дуге</span><b>время полёта + падение</b></div>
+          <div class="row"><span>Метки сетки оптики</span><b>50 … 300 м, шаг 50</b></div>
+          <div class="row"><span>Дальномер по центру</span><b>в оптике</b></div>
+          <div class="row"><span>Боковой ветер</span><b>случайный на бой</b></div>
+          <div class="row"><span>Откат по каждому типу</span><b>тикает и у не выбранных</b></div>
+          <div class="row"><span>Тип на откате</span><b style="color:var(--a3)">слот погашен, выстрела нет</b></div>
+        </div>
+      </div>
+      <div>
+        <h2 class="sec">Подвижность</h2>
+        <div class="rows">
+          <div class="row"><span>Подкат</span><b><kbd>Ctrl</kbd> на бегу</b></div>
+          <div class="row"><span>Подтягивание</span><b>уступ до 2 м берётся сам</b></div>
+          <div class="row"><span>Доп. прыжок</span><b class="arc">эфирный толчок в воздухе</b></div>
+          <div class="row"><span>Рывок <kbd>Q</kbd></span><b class="arc">шкала под дыханием</b></div>
+          <div class="row"><span>Лестницы и тросы</span><b>верхние ярусы и мостки</b></div>
+          <div class="row"><span>Сорваться с края</span><b>прыжок ещё засчитывается</b></div>
+        </div>
+        <h2 class="sec" style="margin-top:14px">Правила боя</h2>
+        <div class="rows">
+          <div class="row"><span>Полный крит в голову</span><b style="color:var(--a1)">только матчевым</b></div>
+          <div class="row"><span>Зажигательный в голову</span><b style="color:var(--a3)">×2.2 к урону</b></div>
+          <div class="row"><span>Фугасный урон</span><b>без крита, спад от центра</b></div>
+          <div class="row"><span>Урон по корпусу</span><b>растёт с зарядом</b></div>
+          <div class="row"><span>Стрельба без оптики</span><b>большой разброс</b></div>
+          <div class="row"><span>Противник целится</span><b style="color:var(--bad)">луч + блик оптики</b></div>
+          <div class="row"><span>RED работают отрядом</span><b style="color:var(--bad)">обход, ярусы, подавление</b></div>
+        </div>
+        <h2 class="sec" style="margin-top:14px">Сложность</h2>
+        <div class="seg" id="diffSeg">
+          <button data-d="easy">НОВОБРАНЕЦ</button>
+          <button data-d="normal" class="on">СНАЙПЕР</button>
+          <button data-d="hard">ЛЕГЕНДА</button>
+        </div>
+        <div class="hint" id="diffHint" style="margin-top:8px"></div>
+      </div>
+    </div>
+    <div class="foot">
+      <button class="btn" id="playBtn">ОДИНОЧНЫЙ БОЙ</button>
+      <!-- Подключение стоит рядом с «в бой» намеренно: это второй способ начать
+           тот же матч, а не отдельный раздел настроек. Адрес подставляется тот,
+           с которого открыта страница, — обычно вводить не нужно ничего. -->
+      <div id="netPanel">
+        <div class="nrow">
+          <label class="nlbl" for="netAddr">СЕРВЕР</label>
+          <input id="netAddr" class="nin" type="text" spellcheck="false" autocomplete="off" placeholder="localhost:8177">
+          <label class="nlbl" for="netName">ПОЗЫВНОЙ</label>
+          <input id="netName" class="nin" type="text" maxlength="16" spellcheck="false" autocomplete="off" placeholder="СНАЙПЕР">
+          <button class="btn sm netbtn" id="netPlayBtn">ИГРАТЬ ПО СЕТИ</button>
+        </div>
+        <div class="nrow2">
+          <span id="netState" class="nstate">НЕ ПОДКЛЮЧЕНО</span>
+          <span id="netMsg" class="nmsg"></span>
+          <span class="nfair">Попадания засчитывает стреляющий, сервер проверяет заявки — игра с друзьями, не античит.</span>
+        </div>
+      </div>
+      <span class="hint">Клик по экрану захватывает мышь. <kbd>Esc</kbd> — пауза и настройки.</span>
+    </div>
+  </div>
+</div>
+
+<!-- ================= ЛОББИ ================= -->
+<div id="netLobby" class="screen hide">
+  <div class="card panel" style="width:min(720px,96vw)">
+    <div class="head"><h1 style="font-size:30px">ЛОББИ</h1><div class="sub" id="netLobbySub">DM_DUEL v3 · СЕТЕВОЙ БОЙ</div></div>
+    <div class="body" style="grid-template-columns:1fr">
+      <div>
+        <h2 class="sec">Бойцы в комнате</h2>
+        <div id="netLobbyList" class="nlist"></div>
+        <div class="nbots" id="netLobbyBots">СВОБОДНЫЕ СЛОТЫ ЗАЙМУТ БОТЫ: <b>0</b></div>
+        <div class="nfair">Попадания засчитывает стреляющий, сервер лишь проверяет заявки: игра рассчитана на бой с друзьями, а не на защиту от читеров. Ботов симулирует один клиент — он отмечен в списке.</div>
+      </div>
+    </div>
+    <div class="foot">
+      <button class="btn" id="netStartBtn">В БОЙ</button>
+      <button class="btn sm" id="netLeaveBtn">ВЫЙТИ ИЗ КОМНАТЫ</button>
+      <span class="hint" id="netLobbyMsg"></span>
+    </div>
+  </div>
+</div>
+
+<!-- ================= ПАУЗА ================= -->
+<div id="pause" class="screen hide">
+  <div class="card panel" style="width:min(560px,96vw)">
+    <div class="head"><h1 style="font-size:30px">ПАУЗА</h1><div class="sub">DM_DUEL v3</div></div>
+    <div class="body" style="grid-template-columns:1fr">
+      <div>
+        <h2 class="sec">Настройки</h2>
+        <div class="opt"><span style="width:150px">Чувствительность</span><input type="range" id="optSens" min="20" max="400" value="130"><span class="v" id="vSens">1.30</span></div>
+        <div class="opt"><span style="width:150px">Обзор (FOV)</span><input type="range" id="optFov" min="65" max="105" value="80"><span class="v" id="vFov">80</span></div>
+        <div class="opt"><span style="width:150px">Громкость</span><input type="range" id="optVol" min="0" max="100" value="70"><span class="v" id="vVol">70</span></div>
+        <div class="opt"><span style="width:150px">Тени</span><input type="range" id="optSh" min="0" max="2" value="2"><span class="v" id="vSh">выс</span></div>
+        <h2 class="sec" style="margin-top:14px">Сложность</h2>
+        <div class="seg" id="diffSeg2">
+          <button data-d="easy">НОВОБРАНЕЦ</button><button data-d="normal" class="on">СНАЙПЕР</button><button data-d="hard">ЛЕГЕНДА</button>
+        </div>
+        <h2 class="sec" style="margin-top:14px">Напоминание</h2>
+        <div class="rows">
+          <div class="row"><span>Подкат</span><b><kbd>Ctrl</kbd> на бегу</b></div>
+          <div class="row"><span>Рывок</span><b class="arc"><kbd>Q</kbd></b></div>
+          <div class="row"><span>Доп. прыжок / подтягивание</span><b><kbd>Space</kbd></b></div>
+          <div class="row"><span>Лестница, трос</span><b><kbd>W</kbd> в зоне</b></div>
+          <div class="row"><span>Табло в сетевом бою</span><b><kbd>Tab</kbd> — удерживать</b></div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><button class="btn" id="resumeBtn">ПРОДОЛЖИТЬ</button><button class="btn sm" id="restartBtn">НАЧАТЬ ЗАНОВО</button></div>
+  </div>
+</div>
+
+<!-- ================= ИТОГИ ================= -->
+<div id="end" class="screen hide">
+  <div class="card panel" style="width:min(680px,96vw)">
+    <div class="head"><h1 id="endTitle">ПОБЕДА</h1><div class="sub" id="endSub">DM_DUEL v3</div></div>
+    <div class="body" style="grid-template-columns:1fr">
+      <div>
+        <div class="statgrid">
+          <div class="stbox"><div class="k">ФРАГИ</div><div class="v" id="eK">0</div></div>
+          <div class="stbox"><div class="k">СМЕРТИ</div><div class="v" id="eD">0</div></div>
+          <div class="stbox"><div class="k">В ГОЛОВУ</div><div class="v" id="eH">0</div></div>
+          <div class="stbox"><div class="k">ТОЧНОСТЬ</div><div class="v" id="eA">0%</div></div>
+          <div class="stbox"><div class="k">ЛУЧШИЙ ВЫСТРЕЛ</div><div class="v" id="eR">0 м</div></div>
+          <div class="stbox"><div class="k">ВРЕМЯ БОЯ</div><div class="v" id="eT">0:00</div></div>
+          <div class="stbox"><div class="k">ПОДОБРАНО</div><div class="v" id="eP">0</div></div>
+          <div class="stbox"><div class="k">УРОН ОГНЁМ</div><div class="v" id="eB">0 HP</div></div>
+          <div class="stbox"><div class="k">УРОН ФУГАСОМ</div><div class="v" id="eF">0 HP</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><button class="btn" id="againBtn">РЕВАНШ</button><button class="btn sm" id="toMenuBtn">К БРИФИНГУ</button></div>
+  </div>
+</div>
+
+<div id="loadNote">ЗАГРУЗКА ДВИЖКА…</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';

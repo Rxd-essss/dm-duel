@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>DM_DUEL v3 — Дуэль снайперов</title>
+<style>
+/* ======================================================================
+   DM_DUEL v3 — HUD. Палитра и типографика в духе Team Fortress 2:
+   плотные тёмные панели с фаской, пергаментный текст, оранжевый акцент,
+   командные цвета RED/BLU. Магия v3 — холодный «арканный» акцент, им
+   помечено всё, что относится к рывку, рунам и эфирным механикам.
+
+   Правило читаемости: центр экрана — зона боя. Всё, что рисуется у
+   перекрестья (кольца поражения, метки зон), держим тонким и полупрозрачным,
+   яркое и плотное уводим на периферию.
+   ====================================================================== */
+:root{
+  --red:#b8383b; --red-dk:#7a2427;
+  --blu:#5885a2; --blu-dk:#31576f;
+  --paper:#f2e6cf; --paper-dim:#c9bda6;
+  --panel:#3b352e; --panel-dk:#221f1b; --edge:#12100e;
+  --amber:#cf7336; --gold:#e9c46a;
+  --ok:#8fbf5a; --bad:#d1493f;
+  /* цвета типов боеприпаса — одни и те же в поясе, в брифинге и у марки */
+  --a1:#e9c46a; --a2:#e08a4a; --a3:#e2593f;
+  /* магия: рывок, руны, эфир */
+  --arc:#62d8ff; --arc-dk:#1d6f96;
+  --ui: "Arial Black","Arial Bold",Impact,Haettenschweiler,"Franklin Gothic Heavy","Noto Sans",sans-serif;
+  --body: "Trebuchet MS","Segoe UI",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:#0d0c0b;color:var(--paper);font-family:var(--body)}
+canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
+.hide{display:none !important}
+
+/* ---------- общие панели ---------- */
+.panel{
+  background:linear-gradient(180deg,#453e35 0%,#2b2722 55%,#211e19 100%);
+  border:2px solid var(--edge);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.14), inset 0 -2px 0 rgba(0,0,0,.5), 0 6px 18px rgba(0,0,0,.55);
+  border-radius:3px;
+}
+.ttl{font-family:var(--ui);letter-spacing:.06em;text-transform:uppercase}
+
+/* ---------- HUD ---------- */
+#hud{position:fixed;inset:0;pointer-events:none;user-select:none;z-index:10}
+
+/* здоровье */
+#hp{position:absolute;left:26px;bottom:24px;min-width:190px;padding:8px 16px 10px;display:flex;align-items:center;gap:14px}
+#hp .lbl{font-family:var(--ui);font-size:12px;color:var(--paper-dim);letter-spacing:.14em}
+#hpNum{font-family:var(--ui);font-size:54px;line-height:.92;color:var(--paper);text-shadow:0 3px 0 rgba(0,0,0,.6)}
+#hpNum.low{color:var(--bad);animation:pulse .7s infinite alternate}
+#hp .cross{width:34px;height:34px;position:relative;flex:0 0 auto;opacity:.85}
+#hp .cross:before,#hp .cross:after{content:"";position:absolute;background:var(--blu);border:2px solid var(--edge)}
+#hp .cross:before{left:11px;top:0;width:12px;height:34px}
+#hp .cross:after{left:0;top:11px;width:34px;height:12px}
+@keyframes pulse{to{opacity:.45}}
+#hpBarWrap{position:absolute;left:26px;bottom:12px;width:190px;height:7px;background:#171512;border:2px solid var(--edge)}
+#hpBar{height:100%;width:100%;background:linear-gradient(180deg,#7fb0d0,#3d6b8a);transition:width .12s linear}
+
+/* патроны. Панель поднята над поясом: в v3 у неё появилась строка отката,
+   и на прежней высоте её накрывали слоты. */
+#ammo{position:absolute;right:26px;bottom:64px;padding:8px 16px 10px;text-align:right;min-width:210px}
+#ammoNum{font-family:var(--ui);font-size:50px;line-height:.95;color:var(--paper);text-shadow:0 3px 0 rgba(0,0,0,.6)}
+#ammoNum small{font-size:22px;color:var(--paper-dim)}
+#ammoName{font-family:var(--ui);font-size:13px;letter-spacing:.1em;color:var(--gold)}
+/* строка отката выбранного типа: держим место всегда, чтобы панель не прыгала */
+#ammoCd{font-family:var(--ui);font-size:12px;letter-spacing:.1em;color:var(--a3);height:14px;line-height:14px;
+  text-shadow:0 1px 2px rgba(0,0,0,.8);opacity:0;transition:opacity .12s}
+#ammoCd.on{opacity:1}
+
+/* пояс — единственный кликабельный кусок HUD: #hud целиком с pointer-events:none,
+   иначе слои поверх канваса съедали бы захват мыши. Тип патрона меняют мышью,
+   поэтому возвращаем события ровно поясу и ничему больше. */
+#ammoBelt{position:absolute;right:26px;bottom:12px;display:flex;gap:6px;justify-content:flex-end;pointer-events:auto}
+.slot{position:relative;overflow:hidden;width:66px;padding:4px 0 5px;text-align:center;background:#221f1b;border:2px solid var(--edge);opacity:.5;cursor:pointer;transition:opacity .12s,transform .12s,box-shadow .12s}
+.slot .k{font-family:var(--ui);font-size:11px;color:var(--paper-dim);position:relative;z-index:2}
+.slot .n{font-family:var(--ui);font-size:11px;letter-spacing:.03em;position:relative;z-index:2}
+.slot.act{opacity:1;transform:translateY(-4px);box-shadow:0 0 0 2px var(--amber),0 6px 12px rgba(0,0,0,.6)}
+.slot.a1 .n{color:var(--a1)} .slot.a2 .n{color:var(--a2)} .slot.a3 .n{color:var(--a3)}
+.slot.empty{filter:grayscale(1) brightness(.55)}
+/* заливка отката — растёт снизу, «остывающий» ствол */
+.slot .cd{position:absolute;left:0;bottom:0;width:100%;height:0;z-index:1;
+  background:linear-gradient(180deg,rgba(226,89,63,.50),rgba(226,89,63,.16));
+  border-top:1px solid rgba(255,190,140,.55)}
+/* секунды до готовности — поверх подписи, крупно и по центру слота */
+.slot .cdt{position:absolute;inset:0;z-index:3;display:none;align-items:center;justify-content:center;
+  font-family:var(--ui);font-size:17px;color:#ffe0c8;text-shadow:0 0 4px #000,0 2px 0 rgba(0,0,0,.7)}
+/* гасим слот, пока тип на откате: он читается, но явно нерабочий */
+.slot.cool{opacity:.62;filter:grayscale(.5) brightness(.72)}
+.slot.cool .k,.slot.cool .n{opacity:.35}
+.slot.cool .cdt{display:flex}
+.slot.rdy{animation:slotRdy .5s ease-out}
+@keyframes slotRdy{
+  0%{box-shadow:0 0 0 3px #fff,0 0 22px 6px rgba(255,220,150,.9)}
+  100%{box-shadow:0 0 0 2px rgba(255,220,150,0),0 0 0 0 rgba(255,220,150,0)}
+}
+
+/* перезарядка / затвор */
+#reload{position:absolute;left:50%;bottom:120px;transform:translateX(-50%);width:220px;text-align:center}
+#reload .t{font-family:var(--ui);font-size:12px;letter-spacing:.12em;color:var(--paper-dim);margin-bottom:4px}
+#reload .bar{height:8px;background:#171512;border:2px solid var(--edge)}
+#reload .fill{height:100%;width:0;background:var(--amber)}
+
+/* Строка статусов: откат, горение, состояние паркура. Стоит слева над
+   здоровьем, а не по центру: центральная колонка уже занята полосой заряда,
+   затвором, дыханием и подписями оптики — на ноутбуке 768 px они сходятся. */
+#status{position:absolute;left:26px;bottom:152px;display:flex;flex-direction:column-reverse;
+  align-items:flex-start;gap:3px;width:max-content;max-width:34vw}
+.st{max-width:100%;overflow:hidden;text-overflow:ellipsis;
+  font-family:var(--ui);font-size:12px;letter-spacing:.09em;padding:3px 10px 4px;
+  background:rgba(20,18,16,.78);border:2px solid var(--edge);border-left-width:5px;
+  color:var(--gold);border-left-color:var(--gold);text-shadow:0 1px 2px rgba(0,0,0,.8);
+  white-space:nowrap;animation:stin .16s ease-out}
+@keyframes stin{from{transform:translateX(-10px);opacity:0}}
+
+/* заряд выстрела */
+#chargeWrap{position:absolute;left:50%;top:calc(50% + 62px);transform:translateX(-50%);width:190px;display:none}
+#chargeWrap.on{display:block}
+#chargeWrap .bar{height:9px;background:rgba(10,9,8,.75);border:2px solid rgba(0,0,0,.85)}
+#chargeFill{height:100%;width:0%;background:linear-gradient(90deg,#8fbf5a,#e9c46a 60%,#cf7336)}
+#chargeWrap .cap{font-family:var(--ui);font-size:10px;letter-spacing:.12em;text-align:center;color:var(--paper-dim);margin-top:3px;text-shadow:0 1px 2px #000}
+
+/* дыхание/спринт */
+#stam{position:absolute;left:50%;bottom:96px;transform:translateX(-50%);width:150px;height:5px;background:rgba(10,9,8,.6);border:2px solid rgba(0,0,0,.7);opacity:0;transition:opacity .25s}
+#stamFill{height:100%;width:100%;background:#9fd3e8}
+#stam.on{opacity:1}
+
+/* магический рывок: та же ширина, что у дыхания — читается как второй ресурс */
+#dash{position:absolute;left:50%;bottom:78px;transform:translateX(-50%);width:150px;height:5px;
+  background:rgba(10,9,8,.6);border:2px solid rgba(0,0,0,.7);transition:opacity .2s}
+#dashFill{height:100%;width:100%;background:linear-gradient(90deg,var(--arc-dk),var(--arc));transition:width .06s linear}
+#dash .cap{position:absolute;right:calc(100% + 8px);top:-5px;font-family:var(--ui);font-size:10px;
+  letter-spacing:.1em;color:var(--paper-dim);white-space:nowrap;text-shadow:0 1px 2px #000}
+#dash.ready{box-shadow:0 0 8px 1px rgba(98,216,255,.55)}
+#dash.ready #dashFill{background:linear-gradient(90deg,#8ee6ff,#d8f7ff)}
+#dash.ready .cap{color:var(--arc)}
+#dash.charging{opacity:.85}
+
+/* прицельная марка без оптики */
+#xh{position:absolute;left:50%;top:50%;width:0;height:0}
+#xh div{position:absolute;background:#f6f1e4;box-shadow:0 0 0 1px rgba(0,0,0,.65),0 0 3px rgba(0,0,0,.85)}
+#xh .h{width:3px;height:11px;left:-1.5px}
+#xh .v{height:3px;width:11px;top:-1.5px}
+#xh .dot{width:3px;height:3px;left:-1.5px;top:-1.5px;background:var(--amber)}
+/* точка марки красится в цвет заряженного типа — тип виден, не отрывая глаз от центра */
+#xh.a1 .dot{background:var(--a1)} #xh.a2 .dot{background:var(--a2)} #xh.a3 .dot{background:var(--a3)}
+#hitmark{position:absolute;left:50%;top:50%;width:0;height:0;opacity:0}
+#hitmark i{position:absolute;width:15px;height:3px;background:#fff;left:-7.5px;top:-1.5px;box-shadow:0 0 3px #000}
+#hitmark i:nth-child(1){transform:rotate(45deg)}
+#hitmark i:nth-child(2){transform:rotate(-45deg)}
+#hitmark.crit i{background:var(--gold);height:4px;width:19px;left:-9.5px}
+
+/* индикатор зоны поражения: фугасный радиус и метка очага огня.
+   Рисуется в экранных координатах вокруг точки прицеливания. */
+#aimZone{position:absolute;left:50%;top:50%;width:0;height:0;opacity:0;transition:opacity .12s;color:var(--a2)}
+#aimZone.on{opacity:1}
+#aimZone.frag{color:var(--a2)} #aimZone.fire{color:var(--a3)}
+/* приглушение обязано быть строже .on, иначе оно же и показывает скрытую зону */
+#aimZone.on.cool{opacity:.28;filter:grayscale(.6)}
+#aimZone>div{position:absolute;left:0;top:0;transform:translate(-50%,-50%);border-radius:50%;pointer-events:none}
+#aimOut{border:2px dashed currentColor;opacity:.68;
+  box-shadow:0 0 0 1px rgba(0,0,0,.5),inset 0 0 0 1px rgba(0,0,0,.4),0 0 10px rgba(0,0,0,.35)}
+#aimIn{border:2px solid currentColor;opacity:.42;
+  box-shadow:0 0 0 1px rgba(0,0,0,.45),inset 0 0 14px rgba(0,0,0,.25)}
+/* вплотную к цели кольцо разрастается на пол-экрана — гасим его, чтобы не
+   перекрывало силуэты: информация о радиусе нужна, а не забор поперёк вида */
+#aimZone.wide #aimOut{opacity:.38}
+#aimZone.wide #aimIn{opacity:.20}
+#aimZone.fire #aimOut{border-style:dotted;border-width:3px}
+#aimZone.fire #aimIn{display:none}
+/* сам стоишь в радиусе собственного подрыва — предупреждаем цветом тревоги */
+#aimZone.near{color:var(--bad)}
+#aimZone.near #aimOut{border-style:solid;opacity:.95}
+#aimZone #aimCap{border:0;border-radius:0;font-family:var(--ui);font-size:10px;letter-spacing:.11em;
+  color:currentColor;white-space:nowrap;text-shadow:0 0 4px #000,0 1px 2px #000;opacity:.9}
+
+/* оптика */
+#scope{position:fixed;inset:0;display:none;z-index:11;pointer-events:none}
+#scope.on{display:block}
+#lens{position:absolute;left:50%;top:50%;width:80vmin;height:80vmin;transform:translate(-50%,-50%);border-radius:50%;
+  box-shadow:0 0 0 100vmax rgba(6,7,6,.975), inset 0 0 70px 26px rgba(0,0,0,.8), inset 0 0 0 4px rgba(0,0,0,.95), inset 0 0 0 7px rgba(120,120,110,.25);}
+#lensGlare{position:absolute;left:50%;top:50%;width:80vmin;height:80vmin;transform:translate(-50%,-50%);border-radius:50%;
+  background:radial-gradient(circle at 32% 26%, rgba(210,230,255,.13), rgba(0,0,0,0) 42%);mix-blend-mode:screen}
+#retSvg{position:absolute;left:50%;top:50%;width:80vmin;height:80vmin;transform:translate(-50%,-50%)}
+#rangeTxt{position:absolute;left:50%;top:calc(50% + 20vmin);transform:translateX(-50%);font-family:var(--ui);font-size:15px;color:#d8ffd0;text-shadow:0 0 6px #000;letter-spacing:.08em}
+/* подпись типа и готовности прямо в поле зрения — не надо смотреть на пояс */
+#scopeInfo{position:absolute;left:50%;top:calc(50% + 25vmin);transform:translateX(-50%);font-family:var(--ui);
+  font-size:11px;letter-spacing:.12em;color:#b9cfae;text-shadow:0 0 6px #000;white-space:nowrap}
+/* в оптике пояс закрыт затемнением линзы, и эта строка — единственный
+   индикатор отката. Красим сам элемент: внутрь пишется только textContent,
+   вложенных тегов там нет и никогда не было. */
+#scopeInfo.cool{color:#ff9a72}
+
+/* счёт / киллфид / ветер */
+#score{position:absolute;left:50%;top:14px;transform:translateX(-50%);display:flex;align-items:stretch;gap:0;overflow:hidden}
+#score .s{padding:6px 20px 8px;font-family:var(--ui);font-size:30px;line-height:1}
+#score .blu{background:linear-gradient(180deg,#5b8aa8,#2f5670);color:#eef6fb}
+#score .red{background:linear-gradient(180deg,#c04a4c,#7a2427);color:#fbeeee}
+#score .mid{padding:6px 12px 8px;font-family:var(--ui);font-size:12px;color:var(--paper-dim);letter-spacing:.1em;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px}
+#feed{position:absolute;right:20px;top:14px;width:330px;display:flex;flex-direction:column;gap:4px;align-items:flex-end}
+.fe{font-family:var(--ui);font-size:12px;letter-spacing:.02em;padding:4px 9px;background:rgba(20,18,16,.82);border:2px solid var(--edge);white-space:nowrap;animation:fein .18s ease-out}
+@keyframes fein{from{transform:translateX(14px);opacity:0}}
+.fe .b{color:#8fc0dd} .fe .r{color:#e08d8d} .fe .w{color:var(--gold)}
+#wind{position:absolute;left:20px;top:14px;padding:6px 10px;display:flex;align-items:center;gap:9px}
+#wind .arw{font-family:var(--ui);font-size:18px;color:var(--gold);transform-origin:50% 50%}
+#wind .txt{font-family:var(--ui);font-size:11px;letter-spacing:.08em;color:var(--paper-dim)}
+#objective{position:absolute;left:20px;top:58px;padding:5px 10px;font-family:var(--ui);font-size:11px;letter-spacing:.08em;color:var(--paper-dim)}
+
+/* подсказки и урон */
+#toast{position:absolute;left:50%;top:22%;transform:translateX(-50%);text-align:center;font-family:var(--ui);font-size:30px;color:var(--gold);text-shadow:0 3px 0 rgba(0,0,0,.7);opacity:0;transition:opacity .2s;letter-spacing:.05em}
+#toast .sub{display:block;font-size:14px;color:var(--paper-dim);letter-spacing:.14em;margin-top:4px}
+/* виньетка урона: тень задана один раз и намертво, а мигаем только opacity.
+   Анимация box-shadow заставляла браузер каждый раз пересчитывать блюр на
+   весь экран — при горении это происходило дважды в секунду. */
+#dmgvig{position:absolute;inset:0;opacity:0;will-change:opacity;transition:opacity .25s;
+  box-shadow:inset 0 0 180px 40px rgba(150,20,15,.75)}
+#dirs{position:absolute;left:50%;top:50%;width:0;height:0}
+.dind{position:absolute;left:-14px;top:-118px;width:28px;height:22px;transform-origin:14px 118px;
+  background:linear-gradient(180deg,rgba(230,60,45,.95),rgba(230,60,45,0));clip-path:polygon(50% 0,100% 100%,0 100%);opacity:0}
+#lowhp{position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(0,0,0,0) 45%,rgba(120,10,8,.5) 100%);opacity:0;transition:opacity .3s}
+/* горение: тёплая виньетка + языки снизу, мигает — но центр экрана оставляем чистым */
+#burnvig{position:absolute;inset:0;opacity:0;transition:opacity .3s;
+  background:
+    radial-gradient(ellipse at center,rgba(0,0,0,0) 40%,rgba(196,74,18,.38) 84%,rgba(120,28,4,.6) 100%),
+    linear-gradient(0deg,rgba(255,120,30,.30) 0%,rgba(255,120,30,0) 26%);}
+#burnvig.on{opacity:1;animation:burnFlick .38s infinite alternate}
+@keyframes burnFlick{from{opacity:.68}to{opacity:1}}
+#dead{position:absolute;inset:0;background:rgba(80,10,8,.35);display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px}
+#dead .t{font-family:var(--ui);font-size:52px;color:#f0d5d5;text-shadow:0 4px 0 rgba(0,0,0,.6)}
+#dead .s{font-family:var(--ui);font-size:16px;color:var(--paper-dim);letter-spacing:.14em}
+
+/* ---------- экраны ---------- */
+/* align-items:center у переполненного flex-контейнера срезает верх карточки
+   и до него уже не доскроллить. Поэтому выравниваем по началу, а центрирует
+   auto-margin: он же сам сдаётся, когда карточка выше экрана. */
+.screen{position:fixed;inset:0;z-index:30;display:flex;align-items:flex-start;justify-content:center;
+  background:radial-gradient(ellipse at 50% 40%,#3a332b 0%,#17150f 70%);padding:20px;overflow:auto}
+.card{width:min(1180px,96vw);padding:0;overflow:hidden;margin:auto}
+.head{padding:13px 26px 10px;background:linear-gradient(180deg,#57493a,#332c24);border-bottom:2px solid var(--edge);display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+.head h1{font-family:var(--ui);font-size:40px;letter-spacing:.02em;color:var(--paper);text-shadow:0 3px 0 rgba(0,0,0,.55)}
+.head h1 span{color:var(--amber)}
+.head .sub{font-family:var(--ui);font-size:12px;letter-spacing:.18em;color:var(--paper-dim)}
+/* брифинг v3 длиннее v2 (паркур, откаты) — раскладываем в три колонки,
+   чтобы кнопка «В БОЙ» оставалась на экране ноутбука 1366×768 */
+.body{padding:14px 26px 17px;display:grid;grid-template-columns:1.05fr 1fr .95fr;gap:20px}
+@media(max-width:1080px){.body{grid-template-columns:1fr 1fr}}
+@media(max-width:760px){.body{grid-template-columns:1fr}}
+h2.sec{font-family:var(--ui);font-size:13px;letter-spacing:.16em;color:var(--amber);margin:0 0 6px}
+.rows{display:flex;flex-direction:column;gap:4px}
+.row{display:flex;justify-content:space-between;gap:12px;font-size:13.5px;color:var(--paper-dim);border-bottom:1px dashed rgba(255,255,255,.09);padding-bottom:3px}
+.row b{color:var(--paper);font-weight:600;text-align:right;flex:0 0 auto}
+.ammoCard{border:2px solid var(--edge);background:#231f1a;padding:8px 11px;margin-bottom:7px}
+.ammoCard .n{font-family:var(--ui);font-size:14px;letter-spacing:.06em;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.ammoCard .n em{font-style:normal;font-size:10.5px;letter-spacing:.1em;color:#9d947f}
+.ammoCard .d{font-size:12.5px;color:var(--paper-dim);margin-top:3px;line-height:1.38}
+.ammoCard .stat{font-size:11px;color:#9d947f;margin-top:5px;font-family:var(--ui);letter-spacing:.05em}
+.ammoCard.a1{border-left:6px solid var(--a1)} .ammoCard.a2{border-left:6px solid var(--a2)} .ammoCard.a3{border-left:6px solid var(--a3)}
+.btn{font-family:var(--ui);font-size:16px;letter-spacing:.08em;color:#221d16;background:linear-gradient(180deg,#e9c46a,#c98f36);
+  border:2px solid var(--edge);padding:12px 22px;cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 4px 0 #6b4a17;transition:.08s}
+.btn:hover{filter:brightness(1.08)} .btn:active{transform:translateY(3px);box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 1px 0 #6b4a17}
+.btn.sm{font-size:12px;padding:8px 14px;background:linear-gradient(180deg,#6d6357,#443c33);color:var(--paper);box-shadow:inset 0 1px 0 rgba(255,255,255,.2),0 3px 0 #17140f}
+.btn:focus-visible{outline:3px solid var(--gold);outline-offset:2px}
+.seg{display:flex;gap:0;border:2px solid var(--edge);width:fit-content}
+.seg button{font-family:var(--ui);font-size:12px;letter-spacing:.08em;padding:8px 16px;border:0;cursor:pointer;background:#332e28;color:var(--paper-dim)}
+.seg button.on{background:linear-gradient(180deg,#c9552f,#8e3a1f);color:#fff}
+.foot{padding:11px 26px 15px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;border-top:2px solid var(--edge);background:#221e19}
+.hint{font-size:12px;color:#9d947f}
+.opt{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--paper-dim);margin-bottom:9px}
+.opt input[type=range]{flex:1;accent-color:var(--amber)}
+.opt .v{font-family:var(--ui);font-size:12px;color:var(--paper);min-width:44px;text-align:right}
+kbd{font-family:var(--ui);font-size:11px;background:#1d1a16;border:2px solid #0d0c0a;border-bottom-width:3px;padding:2px 6px;color:var(--paper);letter-spacing:.04em}
+/* магические механики в брифинге помечаем арканным цветом */
+.arc{color:var(--arc)}
+#loadNote{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#17150f;z-index:60;
+  font-family:var(--ui);font-size:15px;letter-spacing:.14em;color:var(--paper-dim);text-align:center;padding:24px}
+.statgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.stbox{border:2px solid var(--edge);background:#231f1a;padding:10px 12px}
+.stbox .k{font-size:11px;letter-spacing:.1em;color:#9d947f;font-family:var(--ui)}
+.stbox .v{font-family:var(--ui);font-size:26px;color:var(--paper);margin-top:2px}
+
+/* ======================================================================
+   МУЛЬТИПЛЕЕР — подключение, лобби, табло.
+
+   Своего языка интерфейса здесь нет и быть не должно: те же фаски, тот же
+   пергамент, тот же оранжевый акцент. Команды различаем ровно теми же
+   RED/BLU, что и счёт наверху, — вторая палитра заставила бы игрока
+   переучиваться посреди боя.
+
+   Всё сетевое в HUD (#netHud, #netBoard) — только для чтения, кликать там
+   нечего, поэтому pointer-events НЕ возвращаем. Кликабельны лишь поля и
+   кнопки на экранах, а они лежат вне #hud и событий не теряют.
+   ====================================================================== */
+
+/* ---------- экран подключения: живёт в подвале брифинга, рядом с «В БОЙ» ---------- */
+/* Панель намеренно сжата по вертикали. Брифинг на ноутбуке 1366×768 и без неё
+   упирался в нижнюю кромку — каждая лишняя строка здесь уводит «в бой» под обрез.
+   Отсюда и верхняя граница ширины: широкая панель занимает меньше строк. */
+#netPanel{flex:1 1 660px;min-width:290px;max-width:660px;border:2px solid var(--edge);background:#231f1a;padding:6px 9px 7px}
+/* подсказке подвала оставляем ровно столько, чтобы панель уместилась в одну
+   строку: иначе кнопка «играть по сети» переносится и панель растёт вдвое */
+#menu .foot .hint{flex:1 1 180px;min-width:0}
+#netPanel .nrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+#netPanel .nrow2{display:flex;align-items:baseline;gap:9px;margin-top:5px;flex-wrap:wrap}
+.nlbl{font-family:var(--ui);font-size:10px;letter-spacing:.12em;color:#9d947f;flex:0 0 auto}
+.nin{font-family:var(--body);font-size:12.5px;color:var(--paper);background:#15130f;
+  border:2px solid var(--edge);border-bottom-color:#4a4136;padding:4px 7px;min-width:0;outline:none}
+.nin::placeholder{color:#6d6558}
+.nin:focus{border-color:var(--amber);background:#1b1813}
+#netAddr{flex:1 1 150px}
+#netName{flex:0 1 128px}
+/* кнопка сети синяя, «одиночный бой» остаётся золотой: два разных действия
+   не должны выглядеть одинаково — по цвету видно, куда ведёт нажатие */
+.btn.netbtn{flex:0 0 auto;font-size:11px;padding:6px 13px;background:linear-gradient(180deg,#7fb0d0,#3d6b8a);
+  color:#0d1418;box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 3px 0 #1d3d52}
+.btn:disabled{filter:grayscale(.65) brightness(.75);cursor:default;transform:none}
+.nstate{font-family:var(--ui);font-size:11px;letter-spacing:.11em;color:var(--paper-dim);flex:0 0 auto}
+.nstate.ok{color:var(--ok)} .nstate.wait{color:var(--gold)} .nstate.err{color:var(--bad)}
+.nstate.wait:after{content:"";animation:netDots 1.1s steps(4) infinite}
+@keyframes netDots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+.nmsg{font-size:11.5px;color:var(--paper-dim);line-height:1.3;min-width:0}
+.nmsg.err{color:var(--bad)}
+/* честная строка про модель авторитета: игрок обязан узнать про неё ДО боя,
+   поэтому она стоит в самой панели подключения, а не спрятана в лобби */
+.nfair{font-size:11px;line-height:1.35;color:#8d8574;border-left:3px solid var(--amber);padding-left:8px}
+/* в подвале брифинга строка идёт на 10.5px (как вторая строка карточек
+   боеприпаса): на 11px она переносится и панель вырастает ещё на строку.
+   Полноразмерный текст живёт в лобби и на табло — там места достаточно */
+#netPanel .nfair{flex:1 1 260px;min-width:0;font-size:10.5px}
+
+/* ---------- лобби ---------- */
+.nlist{display:flex;flex-direction:column;gap:4px}
+.nplr{display:flex;align-items:center;gap:9px;padding:6px 10px;background:#221f1b;
+  border:2px solid var(--edge);border-left-width:6px}
+.nplr.blu{border-left-color:var(--blu)} .nplr.red{border-left-color:var(--red)}
+.nplr .tag{font-family:var(--ui);font-size:10px;letter-spacing:.1em;padding:2px 7px;border:2px solid var(--edge);flex:0 0 auto}
+.nplr.blu .tag{background:linear-gradient(180deg,#5b8aa8,#2f5670);color:#eef6fb}
+.nplr.red .tag{background:linear-gradient(180deg,#c04a4c,#7a2427);color:#fbeeee}
+.nplr .nm{font-family:var(--ui);font-size:13.5px;color:var(--paper);flex:1 1 auto;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nplr .you{font-family:var(--ui);font-size:10px;letter-spacing:.1em;color:var(--gold);flex:0 0 auto}
+/* хост ботов — магический акцент: он единственный, кто их на самом деле думает */
+.nplr .hostm{font-family:var(--ui);font-size:10px;letter-spacing:.08em;color:var(--arc);
+  border:1px solid var(--arc-dk);padding:1px 6px;flex:0 0 auto}
+.nplr .kd{font-family:var(--ui);font-size:12px;color:var(--paper-dim);flex:0 0 auto}
+.nplr.me{box-shadow:inset 0 0 0 1px rgba(233,196,106,.45)}
+.nplr.empty{justify-content:center;border-left-color:var(--edge);color:#8d8574;
+  font-family:var(--ui);font-size:12px;letter-spacing:.1em}
+.nbots{margin-top:9px;font-family:var(--ui);font-size:11px;letter-spacing:.1em;color:var(--paper-dim)}
+.nbots b{color:var(--gold)}
+
+/* ---------- HUD: пинг и командный счёт ---------- */
+/* под строкой задачи слева: правый верх занят киллфидом, центр — счётом матча */
+#netHud{position:absolute;left:20px;top:92px;display:flex;flex-direction:column;gap:5px;align-items:flex-start}
+#netPing{padding:4px 10px 5px;font-family:var(--ui);font-size:11px;letter-spacing:.09em;color:var(--paper-dim)}
+#netPing.good{color:#9fd68a} #netPing.mid{color:var(--gold)} #netPing.bad{color:var(--bad)}
+#netTeams{padding:5px 8px 6px;display:flex;flex-direction:column;gap:2px;min-width:118px}
+#netTeams .nt{display:flex;justify-content:space-between;gap:14px;padding:1px 5px;
+  font-family:var(--ui);font-size:12px;letter-spacing:.08em;border-left:4px solid var(--edge)}
+#netTeams .nt.blu{border-left-color:var(--blu);color:#a8cfe6}
+#netTeams .nt.red{border-left-color:var(--red);color:#e8a9a9}
+#netTeams .nt.mine{background:rgba(255,255,255,.08)}
+#netTeams .nt b{color:var(--paper)}
+
+/* ---------- табло по Tab ---------- */
+#netBoard{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(640px,92vw)}
+#netBoard .nbCard{padding:0;overflow:hidden}
+.nbHead{display:flex;justify-content:space-between;gap:12px;padding:7px 12px 8px;
+  background:linear-gradient(180deg,#57493a,#332c24);border-bottom:2px solid var(--edge);
+  font-family:var(--ui);font-size:12px;letter-spacing:.12em;color:var(--paper)}
+.nbHead span:last-child{color:var(--paper-dim)}
+.nbCols,.nbRow{display:grid;grid-template-columns:1fr 66px 56px 60px 54px;gap:6px;align-items:center;padding:4px 12px}
+.nbCols{font-family:var(--ui);font-size:10px;letter-spacing:.1em;color:#8d8574;
+  border-bottom:1px dashed rgba(255,255,255,.12)}
+.nbCols span:nth-child(2),.nbRow>span:nth-child(2){text-align:center}
+.nbCols span:nth-child(n+3),.nbRow>span:nth-child(n+3){text-align:right}
+.nbTeam{display:flex;justify-content:space-between;padding:4px 12px 5px;margin-top:4px;background:#2a2621;
+  font-family:var(--ui);font-size:12px;letter-spacing:.12em;border-left:6px solid var(--edge)}
+.nbTeam.blu{border-left-color:var(--blu);color:#a8cfe6}
+.nbTeam.red{border-left-color:var(--red);color:#e8a9a9}
+.nbRow{font-family:var(--ui);font-size:12.5px;color:var(--paper-dim);border-left:6px solid transparent}
+.nbRow.blu{border-left-color:rgba(88,133,162,.45)} .nbRow.red{border-left-color:rgba(184,56,59,.45)}
+.nbRow .nm{color:var(--paper);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nbRow .hb{font-style:normal;font-size:9px;letter-spacing:.08em;color:var(--arc);
+  border:1px solid var(--arc-dk);padding:0 4px;margin-left:7px;vertical-align:1px}
+.nbRow.me{background:rgba(233,196,106,.10)}
+/* мёртвого видно по приглушённому имени — иначе табло врёт про состав боя */
+.nbRow.dead .nm{opacity:.45}
+.nbEmpty{padding:10px 12px;text-align:center;color:#8d8574;font-family:var(--ui);font-size:12px;letter-spacing:.1em}
+.nbFoot{padding:6px 12px 8px;font-size:11px;line-height:1.35;color:#8d8574;
+  border-top:2px solid var(--edge);background:#221e19}
+/* своё имя в киллфиде подсвечиваем свечением, а не цветом: цвет там значит команду */
+.fe .nfme{text-shadow:0 0 7px rgba(255,225,160,.9)}
+</style>
