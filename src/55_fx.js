@@ -40,6 +40,21 @@ const FX_MAXT  = 20;    // трассы
 const FX_MAXN  = 28;    // спрайты цифр урона
 const FX_FIRES = 4;     // одновременных очагов огня
 
+/* Плотность эффектов из настроек качества: 1 — как задумано, ниже — реже.
+   Трогает ТОЛЬКО картинку. Урон, звук и логика от неё не зависят ни в одном
+   месте — иначе настройка графики стала бы настройкой баланса. */
+let FX_dens = 1;
+/* Дробный остаток по каждому источнику копится, а не отбрасывается: при
+   плотности 0.5 «одна щепка» обязана вылетать через раз, а не исчезнуть. */
+let FX_densAcc = 0;
+function FX_cnt(n){
+  if(FX_dens >= 1) return n;
+  const v = n*FX_dens + FX_densAcc;
+  const k = Math.floor(v);
+  FX_densAcc = v - k;
+  return k;
+}
+
 /* --------------------- мягкие частицы: шейдер --------------------- */
 /* gl_PointSize считаем честно через projectionMatrix[1][1]: у three в
    PointsMaterial размер не зависит от FOV, и в оптике (7.5°) весь огонь
@@ -279,16 +294,71 @@ const PGEO = new THREE.BoxGeometry(1,1,1);
 const PMAT = {};
 const FX_EMPTY = {};
 
+/* --------- мешевые частицы: одна InstancedMesh на материал ---------
+   Раньше каждая крошка была отдельным THREE.Mesh в сцене. Замер боевого
+   кадра: 129 живых частиц — это 129 draw call'ов из 411, почти треть всей
+   отрисовки ради 1548 треугольников (2% геометрии). Плюс 360 лишних узлов
+   в графе сцены, которые updateMatrixWorld обходит каждый кадр.
+   Геометрия у всех одна (PGEO), различаются только материал и матрица —
+   ровно случай для инстансинга: один вызов на материал вместо одного на
+   частицу. Стало 411 -> 293 вызова, отправка кадра 2.55 -> 2.00 мс.
+   Картинка не меняется: сравнение по пикселям на посеянном генераторе даёт
+   тот же силуэт, тот же центр и тот же цвет. */
+const FX_IM = new Map();          // material -> {im, n}
+const FX_IMlist = [];             // тот же набор перебором, без итератора Map
+const FX_m4 = new THREE.Matrix4();
+const FX_qt = new THREE.Quaternion();
+const FX_eu = new THREE.Euler();
+const FX_sc = new THREE.Vector3();
+
+function FX_bucket(mat){
+  let b = FX_IM.get(mat);
+  if(b) return b;
+  const im = new THREE.InstancedMesh(PGEO, mat, FX_MAXP);
+  im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  im.count = 0;
+  im.visible = false;
+  // частицы жили с frustumCulled=false и вблизи камеры (дульная вспышка,
+  // кровь под ногами) — отсев по сфере схлопнул бы их на краю экрана
+  im.frustumCulled = false;
+  im.castShadow = false; im.receiveShadow = false;
+  im.matrixAutoUpdate = false;   // геометрия инстансов уже в мировых координатах
+  im.updateMatrix();
+  scene.add(im);
+  b = { im, n:0 };
+  FX_IM.set(mat, b);
+  FX_IMlist.push(b);
+  return b;
+}
+
 let FX_decGeo = null;
 const FX_decT = [];                     // возраст/срок жизни декалей, индексы совпадают с FX.decals
+function FX_decHide(){
+  for(let i=0;i<FX.decals.length;i++){ FX.decals[i].visible = false; FX_decT[i].life = 0; }
+}
 let FX_ringGeo = null;
 const FX_rings = [];
 const FX_tracers = [];
 const FX_fireAll = [];                  // все очаги огня (включая спящие)
 
-const FX_numCache = new Map();          // текстуры цифр урона: значения повторяются постоянно
-let FX_numCtx = null;
-const FX_NUMFONT = 'bold 62px "Arial Black", "Arial Bold", Arial, sans-serif';
+/* Цифры урона: холсты и текстуры — ЗАРАНЕЕ созданный пул, не новые объекты.
+   Замер: подпись, которой ещё не было в кэше, стоила 0.174 мс (уже виденная —
+   0.003 мс). Почти всё это — не рисование текста, а document.createElement
+   ('canvas') дважды за вызов (один холст под замер ширины, второй под глиф)
+   плюс гауссова тень shadowBlur на весь холст. Урон в бою почти всегда новое
+   число, так что четверть кадрового бюджета уходила на каждое попадание.
+   Теперь холст берётся из пула и перерисовывается на месте, а «подложка»
+   под цифрой — вторая обводка со сдвигом вниз вместо размытия.
+   Стало 0.009 мс на новую подпись; памяти под холсты 2.1 МБ вместо 5.2 МБ.
+   Экранный размер глифа сохранён: 40/64 против прежних 62/96. */
+const FX_NUMW = 176, FX_NUMH = 64;      // общий размер ячейки; ar у всех подписей один
+const FX_NUMAR = FX_NUMW/FX_NUMH;
+const FX_NUMFS = 40;                    // базовый кегль; глиф занимает ту же долю высоты, что и раньше (40/64 ≈ 62/96)
+const FX_NUMSLOTS = 48;                 // разных подписей держим готовыми
+const FX_numCache = new Map();          // текст -> слот
+const FX_numSlot = [];                  // {c, x, t, key}
+let FX_numSlotI = 0;
+const FX_NUMFONT = 'bold 40px "Arial Black", "Arial Bold", Arial, sans-serif';
 const FX_NUMCOL = { crit:0xffd24a, splash:0xffa856, burn:0xff7a3c, heal:0x8fe08a, def:0xf4ece0 };
 const FX_numPool = [];                  // спрайты цифр: создаются в init(), дальше только гаснут/зажигаются
 let FX_numI = 0;                        // кольцевой индекс, как у FX.pool и FX.decals
@@ -342,14 +412,16 @@ const FX = {
     PMAT.ember  = basic(0xff9a3c);
     FX_hexKinds();
 
-    /* --- мешевые частицы --- */
+    /* --- мешевые частицы: данные в пуле, отрисовка инстансами --- */
     for(let i=0;i<FX_MAXP;i++){
-      const m = new THREE.Mesh(PGEO, PMAT.dust);
-      m.visible = false; m.frustumCulled = false;
-      scene.add(m);
-      this.pool.push({ m, life:0, max:1, v:new THREE.Vector3(), g:12,
-        rot:new THREE.Vector3(), s0:0.1, s1:0, dr:0, b:0.28, sx:1, sy:1, sz:1 });
+      this.pool.push({ mat:PMAT.dust, life:0, max:1,
+        p:new THREE.Vector3(), v:new THREE.Vector3(), g:12,
+        rot:new THREE.Vector3(), rx:0, ry:0, rz:0,
+        s0:0.1, s1:0, dr:0, b:0.28, sx:1, sy:1, sz:1 });
     }
+    // корзины под известные материалы заводим сразу: первый же выстрел иначе
+    // создавал бы InstancedMesh и компилировал программу прямо в кадре
+    for(const k in PMAT) FX_bucket(PMAT[k]);
 
     /* --- мягкие частицы --- */
     FX_ADD = FX_mkSoft(FX_MAXA, TEX_GLOW, true);
@@ -395,7 +467,7 @@ const FX = {
     for(let i=0;i<FX_FIRES;i++) FX_fireAll.push(FX_mkFire());
 
     for(let i=0;i<10;i++) FX_lpos.push(new THREE.Vector3());
-    FX_numCtx = document.createElement('canvas').getContext('2d');
+    FX_numInitSlots();
 
     /* --- цифры урона: пул, добавленный в сцену один раз ---
        Раньше каждая цифра была new Sprite + new SpriteMaterial + scene.add,
@@ -414,6 +486,12 @@ const FX = {
   /* Индекс поверхностей карты. Зовётся из boot() ПОСЛЕ buildMap() —
      синоним buildSurfaceIndex() для тех, кому удобнее через FX. */
   buildIndex(){ buildSurfaceIndex(); },
+
+  /* Плотность эффектов из настроек качества, 0.25…1. Зовёт 90_game.js.
+     Меняет ТОЛЬКО количество частиц: ни один урон, звук или свет от неё не
+     зависит — событие обязано читаться одинаково на любом качестве. */
+  setDensity(v){ FX_dens = clamp(v, 0.25, 1); FX_densAcc = 0; },
+  density(){ return FX_dens; },
 
   /* ------------------------- мешевые частицы ------------------------- */
   /* opts: mat, speed, life, size, s1, g, dir, push, drag, bounce, sx/sy/sz,
@@ -442,11 +520,11 @@ const FX = {
     const dr = opts.drag || 0;
     const bo = opts.bounce === undefined ? 0.28 : opts.bounce;
     const sx = opts.sx || 1, sy = opts.sy || 1, sz = opts.sz || 1;
-    for(let k=0;k<n;k++){
+    const cnt = FX_cnt(n);
+    for(let k=0;k<cnt;k++){
       const it = this.pool[this.i]; this.i = (this.i+1) % this.pool.length;
-      it.m.material = mat;
-      it.m.visible = true;
-      it.m.position.copy(p);
+      it.mat = mat;
+      it.p.copy(p);
       it.v.set(rnd(-1,1), rnd(-0.1,1.2), rnd(-1,1)).normalize().multiplyScalar(rnd(sp*0.3, sp));
       if(opts.dir) it.v.addScaledVector(opts.dir, opts.push || 0);
       it.g = g; it.dr = dr; it.b = bo;
@@ -454,8 +532,7 @@ const FX = {
       it.s0 = size*rnd(0.6,1.4); it.s1 = s1;
       it.sx = sx; it.sy = sy; it.sz = sz;
       it.rot.set(rnd(-9,9), rnd(-9,9), rnd(-9,9));
-      it.m.scale.set(it.s0*sx, it.s0*sy, it.s0*sz);
-      it.m.rotation.set(rnd(0,3), rnd(0,3), rnd(0,3));
+      it.rx = rnd(0,3); it.ry = rnd(0,3); it.rz = rnd(0,3);
     }
   },
 
@@ -507,7 +584,9 @@ const FX = {
 
     /* --- пыль/дым: то, что читается издалека --- */
     if(k !== 'metal' && k !== 'glass'){
-      const puffs = k === 'flesh' ? 3 : 4;
+      // клуб пыли — главный признак попадания на дистанции, поэтому даже на
+      // низком качестве оставляем хотя бы один
+      const puffs = Math.max(1, FX_cnt(k === 'flesh' ? 3 : 4));
       for(let i=0;i<puffs;i++){
         e = FX_E0();
         e.life = rnd(0.5, 1.0) * (k==='flesh' ? 0.55 : 1);
@@ -525,7 +604,7 @@ const FX = {
 
     /* --- искры: металл, камень и бетон --- */
     if(k === 'metal' || k === 'stone' || k === 'conc' || k === 'glass'){
-      const cnt = k === 'metal' ? Math.round(n*1.6) : 3;
+      const cnt = Math.max(1, FX_cnt(k === 'metal' ? Math.round(n*1.6) : 3));
       for(let i=0;i<cnt;i++){
         e = FX_E0();
         e.life = rnd(0.16, 0.55);
@@ -607,7 +686,8 @@ const FX = {
      ядро белое — чтобы на любом фоне читалась именно вспышка, а не пятно. */
   magic(p, n, color){
     const c = (color === undefined) ? PAL.arcane : color;
-    for(let k=0;k<n;k++){
+    const cnt = Math.max(1, FX_cnt(n));
+    for(let k=0;k<cnt;k++){
       const a = rnd(0, 6.2832), sp = rnd(1.3, 5.4);
       const e = FX_E0();
       e.life = rnd(0.32, 0.9);
@@ -623,6 +703,8 @@ const FX = {
       e.a0 = 0.9;
       FX_emit(FX_ADD, p.x + rnd(-0.12,0.12), p.y + rnd(-0.12,0.12), p.z + rnd(-0.12,0.12));
     }
+    // вспышка света привязана к ЗАПРОШЕННОМУ количеству, а не к выданному:
+    // качество графики не должно менять то, как читается событие
     if(n >= 12) FX_flash(p, c, 1.8, 8, 0.16);
   },
 
@@ -692,9 +774,10 @@ const FX = {
   /* 90_game.js чистит FX своими руками (GM_clearFx) — этот метод для тех,
      кто хочет сделать это одним вызовом и ничего не забыть. */
   reset(){
-    for(let i=0;i<this.pool.length;i++){ this.pool[i].life = 0; this.pool[i].m.visible = false; }
+    for(let i=0;i<this.pool.length;i++) this.pool[i].life = 0;
+    for(let i=0;i<FX_IMlist.length;i++){ const b = FX_IMlist[i]; b.n = 0; b.im.count = 0; b.im.visible = false; }
     FX_clearSoft(FX_ADD); FX_clearSoft(FX_SMO);
-    for(let i=0;i<this.decals.length;i++){ this.decals[i].visible = false; FX_decT[i].life = 0; }
+    FX_decHide();
     for(let i=0;i<FX_rings.length;i++){ FX_rings[i].m.visible = false; FX_rings[i].life = 0; }
     for(let i=0;i<FX_tracers.length;i++){ FX_tracers[i].m.visible = false; FX_tracers[i].life = 0; }
     for(let i=0;i<FX_fireAll.length;i++) FX_fireStop(FX_fireAll[i]);
@@ -704,25 +787,40 @@ const FX = {
 
   /* ------------------------------ КАДР ------------------------------ */
   update(dt){
-    /* --- мешевые частицы --- */
+    /* --- мешевые частицы: физика + запись матриц инстансов --- */
+    for(let i=0;i<FX_IMlist.length;i++) FX_IMlist[i].n = 0;
     for(let i=0;i<this.pool.length;i++){
       const it = this.pool[i];
       if(it.life <= 0) continue;
       it.life -= dt;
-      if(it.life <= 0){ it.m.visible = false; continue; }
+      if(it.life <= 0) continue;
       it.v.y -= it.g*dt;
       if(it.dr > 0){ let f = 1 - it.dr*dt; if(f < 0) f = 0; it.v.multiplyScalar(f); }
-      it.m.position.addScaledVector(it.v, dt);
-      const gy = terrainH(it.m.position.x, it.m.position.z);
-      if(it.m.position.y < gy){
-        it.m.position.y = gy;
+      it.p.addScaledVector(it.v, dt);
+      const gy = terrainH(it.p.x, it.p.z);
+      if(it.p.y < gy){
+        it.p.y = gy;
         it.v.multiplyScalar(it.b);
         it.v.y = Math.abs(it.v.y)*0.42;
         it.rot.multiplyScalar(0.5);
       }
-      it.m.rotation.x += it.rot.x*dt; it.m.rotation.y += it.rot.y*dt; it.m.rotation.z += it.rot.z*dt;
+      it.rx += it.rot.x*dt; it.ry += it.rot.y*dt; it.rz += it.rot.z*dt;
       const v = lerp(it.s1, it.s0, it.life/it.max);
-      it.m.scale.set(v*it.sx, v*it.sy, v*it.sz);
+      const b = FX_IM.get(it.mat) || FX_bucket(it.mat || PMAT.dust);
+      if(b.n >= FX_MAXP) continue;                 // корзина переполнена — частица подождёт
+      FX_eu.set(it.rx, it.ry, it.rz);
+      FX_qt.setFromEuler(FX_eu);
+      FX_sc.set(v*it.sx, v*it.sy, v*it.sz);
+      FX_m4.compose(it.p, FX_qt, FX_sc);
+      b.im.setMatrixAt(b.n++, FX_m4);
+    }
+    for(let i=0;i<FX_IMlist.length;i++){
+      const b = FX_IMlist[i];
+      const on = b.n > 0;
+      // needsUpdate только когда в корзине что-то есть: пустая не перезаливает буфер
+      if(on){ b.im.count = b.n; b.im.instanceMatrix.needsUpdate = true; }
+      else if(b.im.count !== 0) b.im.count = 0;
+      if(b.im.visible !== on) b.im.visible = on;
     }
 
     /* --- мягкие частицы --- */
@@ -911,8 +1009,10 @@ function FX_fireStep(f, dt){
   f.ring.scale.x = f.ring.scale.z = f.r*(1 + 0.02*Math.sin(f.t*4.2));
   f.glow.material.opacity = (0.22 + 0.12*Math.sin(f.t*5.1)) * amp;
 
-  /* --- угли и дым: непрерывная эмиссия с ограничением по частоте --- */
-  f.emit += dt*(11 + f.r*3.5)*amp;
+  /* --- угли и дым: непрерывная эмиссия с ограничением по частоте ---
+     Плотность режет поток, но не ниже трети: очаг обязан остаться живым
+     столбом огня, а не редкими искрами — по нему читается опасная зона. */
+  f.emit += dt*(11 + f.r*3.5)*amp*Math.max(0.34, FX_dens);
   while(f.emit >= 1){
     f.emit -= 1;
     const a = rnd(0, 6.283), d = Math.sqrt(Math.random())*f.r*0.92;
@@ -984,43 +1084,55 @@ function FX_fireStep(f, dt){
 }
 
 /* ===================== ЦИФРЫ УРОНА: текстуры ===================== */
-/* Значения урона повторяются десятками, поэтому холст рисуем один раз на
-   строку. Кэш переживает даже чужой dispose(): three заново зальёт текстуру
-   из холста, который никуда не делся. */
+/* Пул холстов создаётся один раз в init(). Дальше подпись только
+   перерисовывается поверх старой, а вытеснение идёт по кругу: чтобы затереть
+   слот, который ещё висит на экране, пришлось бы выдать FX_NUMSLOTS разных
+   значений урона за полторы секунды жизни цифры — этого не бывает. */
+function FX_numInitSlots(){
+  if(FX_numSlot.length) return;
+  for(let i=0;i<FX_NUMSLOTS;i++){
+    const c = document.createElement('canvas');
+    c.width = FX_NUMW; c.height = FX_NUMH;
+    const t = new THREE.CanvasTexture(c);
+    t.minFilter = THREE.LinearFilter; t.generateMipmaps = false;
+    FX_numSlot.push({ c, x:c.getContext('2d'), t, ar:FX_NUMAR, key:null });
+  }
+}
+function FX_numDraw(s, txt){
+  const x = s.x;
+  x.clearRect(0, 0, FX_NUMW, FX_NUMH);
+  let F = FX_NUMFS;
+  x.font = FX_NUMFONT;
+  const tw = x.measureText(txt).width;
+  const room = FX_NUMW - 14;
+  if(tw > room){
+    F = Math.max(14, Math.floor(FX_NUMFS*room/tw));
+    x.font = 'bold ' + F + 'px "Arial Black", "Arial Bold", Arial, sans-serif';
+  }
+  const cx = FX_NUMW*0.5, cy = FX_NUMH*0.5;
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineJoin = 'round';
+  // подложка вместо размытой тени: на светлом песке белая цифра иначе тонет
+  x.lineWidth = F*0.20; x.strokeStyle = 'rgba(0,0,0,0.5)';
+  x.strokeText(txt, cx, cy + F*0.07);
+  x.lineWidth = F*0.18; x.strokeStyle = '#100e0b';
+  x.strokeText(txt, cx, cy);
+  x.lineWidth = F*0.065; x.strokeStyle = 'rgba(24,20,15,0.95)';
+  x.strokeText(txt, cx, cy);
+  x.fillStyle = '#ffffff';
+  x.fillText(txt, cx, cy);
+  s.t.needsUpdate = true;
+}
 function FX_numTex(txt){
   let e = FX_numCache.get(txt);
   if(e) return e;
-  let F = 62;
-  FX_numCtx.font = FX_NUMFONT;
-  let tw = FX_numCtx.measureText(txt).width;
-  if(tw > 300){ F = Math.max(22, Math.floor(62*300/tw)); }
-  const font = 'bold ' + F + 'px "Arial Black", "Arial Bold", Arial, sans-serif';
-  FX_numCtx.font = font;
-  tw = FX_numCtx.measureText(txt).width;
-  const c = document.createElement('canvas');
-  c.width = clamp(Math.ceil(tw) + 36, 80, 384); c.height = 96;
-  const x = c.getContext('2d');
-  x.font = font; x.textAlign = 'center'; x.textBaseline = 'middle';
-  // тень + толстая обводка: на светлом песке белая цифра иначе исчезает
-  x.shadowColor = 'rgba(0,0,0,0.55)'; x.shadowBlur = 12; x.shadowOffsetY = 4;
-  x.lineJoin = 'round'; x.lineWidth = 11; x.strokeStyle = '#100e0b';
-  x.strokeText(txt, c.width/2, 50);
-  x.shadowColor = 'rgba(0,0,0,0)'; x.shadowBlur = 0; x.shadowOffsetY = 0;
-  x.lineWidth = 4; x.strokeStyle = 'rgba(24,20,15,0.95)';
-  x.strokeText(txt, c.width/2, 50);
-  x.fillStyle = '#ffffff';
-  x.fillText(txt, c.width/2, 50);
-  const t = new THREE.CanvasTexture(c);
-  t.minFilter = THREE.LinearFilter; t.generateMipmaps = false;
-  e = { t, ar: c.width/c.height };
-  FX_numCache.set(txt, e);
-  if(FX_numCache.size > 96){
-    const k = FX_numCache.keys().next().value;
-    const old = FX_numCache.get(k);
-    FX_numCache.delete(k);
-    if(old) old.t.dispose();
-  }
-  return e;
+  if(!FX_numSlot.length) FX_numInitSlots();
+  const s = FX_numSlot[FX_numSlotI]; FX_numSlotI = (FX_numSlotI+1) % FX_numSlot.length;
+  if(s.key !== null) FX_numCache.delete(s.key);
+  FX_numDraw(s, txt);
+  s.key = txt;
+  FX_numCache.set(txt, s);
+  return s;
 }
 
 /* ============================== ВЗРЫВ ============================== */
@@ -1058,7 +1170,8 @@ function explode(p, R, maxDmg, byPlayer, fall, coverMul, ammoIdx){
 
   // ядро: белая вспышка, живёт полтора десятка кадров
   let e;
-  for(let i=0;i<5;i++){
+  const nCore = Math.max(2, FX_cnt(5));
+  for(let i=0;i<nCore;i++){
     e = FX_E0();
     e.life = rnd(0.10, 0.20);
     e.vx = rnd(-2,2)*s; e.vy = rnd(-1,2)*s; e.vz = rnd(-2,2)*s;
@@ -1068,7 +1181,8 @@ function explode(p, R, maxDmg, byPlayer, fall, coverMul, ammoIdx){
     FX_emit(FX_ADD, FX_p.x, FX_p.y, FX_p.z);
   }
   // огненные языки: летят наружу и гаснут из белого в тёмно-красный
-  for(let i=0;i<26;i++){
+  const nLick = Math.max(6, FX_cnt(26));
+  for(let i=0;i<nLick;i++){
     e = FX_E0();
     e.life = rnd(0.30, 0.75);
     const a = rnd(0,6.283), el = rnd(-0.45, 1.0), sp = rnd(5, 17)*s;
@@ -1081,7 +1195,8 @@ function explode(p, R, maxDmg, byPlayer, fall, coverMul, ammoIdx){
     FX_emit(FX_ADD, FX_p.x, FX_p.y, FX_p.z);
   }
   // искры-осколки: мелкие, быстрые, бьются о землю
-  for(let i=0;i<22;i++){
+  const nSpark = Math.max(4, FX_cnt(22));
+  for(let i=0;i<nSpark;i++){
     e = FX_E0();
     e.life = rnd(0.4, 1.1);
     const a = rnd(0,6.283), el = rnd(-0.2, 1.1), sp = rnd(9, 26)*s;
@@ -1094,7 +1209,8 @@ function explode(p, R, maxDmg, byPlayer, fall, coverMul, ammoIdx){
     FX_emit(FX_ADD, FX_p.x, FX_p.y, FX_p.z);
   }
   // дым: медленный, растущий, сносится ветром — по нему видно место разрыва
-  for(let i=0;i<16;i++){
+  const nSmoke = Math.max(5, FX_cnt(16));
+  for(let i=0;i<nSmoke;i++){
     e = FX_E0();
     e.life = rnd(1.6, 3.2);
     const a = rnd(0,6.283), sp = rnd(0.8, 4.5)*s;
@@ -1117,10 +1233,11 @@ function explode(p, R, maxDmg, byPlayer, fall, coverMul, ammoIdx){
     FX.burst(FX_v4, 18, { mat:mm, speed:11*s, life:1.1, size:0.11*s, g:16, surf:false });
     // приземный «воротник» пыли — читается даже когда сам разрыв за укрытием
     const dc = FX_DUSTCOL[k] || FX_DUSTCOL.dirt;
-    for(let i=0;i<12;i++){
+    const nCollar = Math.max(5, FX_cnt(12));
+    for(let i=0;i<nCollar;i++){
       e = FX_E0();
       e.life = rnd(0.9, 1.9);
-      const a = (i/12)*6.283 + rnd(-0.2,0.2), sp = rnd(4, 9)*s;
+      const a = (i/nCollar)*6.283 + rnd(-0.2,0.2), sp = rnd(4, 9)*s;
       e.vx = Math.cos(a)*sp; e.vz = Math.sin(a)*sp; e.vy = rnd(0.4, 1.8);
       e.g = -0.2; e.dr = 1.7;
       e.s0 = 0.4*s; e.s1 = rnd(1.6, 2.8)*s;

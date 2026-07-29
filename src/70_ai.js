@@ -1,7 +1,7 @@
 /* =====================================================================
    ПРОТИВНИКИ v3 — командный слой (SQUAD) и боец (Enemy).
 
-   Главная мысль: трое-пятеро RED должны читаться как отделение, а не как
+   Главная мысль: трое-пятеро ботов должны читаться как отделение, а не как
    три одиночки, случайно оказавшихся рядом. Поэтому знание о цели общее
    (SQUAD.lastKnown), роли раздаются сверху, а пеленги подхода разводятся,
    чтобы игрока брали в клещи, а не набегали колонной по одной тропе.
@@ -21,8 +21,11 @@ const AI_v1 = new THREE.Vector3(), AI_v2 = new THREE.Vector3(), AI_v3 = new THRE
       AI_v4 = new THREE.Vector3(), AI_v5 = new THREE.Vector3();
 const AI_live = [];                       // живые боты текущего тика SQUAD
 const AI_bearUsed = [0,0,0,0,0,0,0,0];    // занятые пеленги при охвате
-const AI_candP = [null,null,null,null];   // финалисты отбора позиции
-const AI_candS = [0,0,0,0];
+/* Финалистов шесть, а не четыре: прострел считается только им, и на карте
+   176×176 четвёрка целиком набиралась из одного гнезда позиций — выбирать
+   между «этим углом двора и соседним» линии огня уже нечем. */
+const AI_candP = [null,null,null,null,null,null];   // финалисты отбора позиции
+const AI_candS = [0,0,0,0,0,0];
 
 /* Паркурный API (A) и пул света (E1) доделываются параллельно. Ждать их
    нельзя, а падать из-за отсутствующего имени — тем более: возможности
@@ -85,6 +88,222 @@ function AI_fireAt(x, z, y, out){
 
 function AI_byRank(a, b){ return a._rank - b._rank; }
 
+/* ==================== СВЯЗНОСТЬ ТОЧЕК ПОЯВЛЕНИЯ ====================
+   Боец обязан появляться там, откуда есть выход в бой. Карта этого не
+   гарантирует, и на «Осаде» это уже случилось: карман RED за донжоном
+   (x -15…15, z ≈ 74.5…77.5) не связан с двором ни пешком, ни лестницей, ни
+   рампой — отделение RED физически не могло покинуть базу, сколько бы точек
+   ему ни предлагали. Это дефект компоновки, но ИИ не имеет права верить в
+   компоновку на слово: непроверенная точка появления стоит целого матча.
+
+   Поэтому каждая точка проверяется РОВНО ОДИН РАЗ за сборку карты: короткая
+   заливка по сетке теми же источниками опоры, что и у moveVert (рельеф,
+   рампа, верхи коробок), с тем же порогом шага. Дошли до любой огневой
+   позиции или упёрлись в лимит — точка живая; заливка выдохлась раньше —
+   мёртвая, и вместо неё берём ближайшую наземную позицию своей половины
+   (для замка это и есть двор, где респавн и задуман).
+
+   Стоимость: одна заливка на точку появления за матч, десятки миллисекунд
+   на старте. В кадре не выполняется ничего. */
+const AI_SPC = 0.75;                        // шаг сетки заливки, м
+const AI_SPQ_MAX = 4000;                    // потолок узлов: дальше и так ясно, что выход есть
+const AI_spqX = new Int32Array(AI_SPQ_MAX);
+const AI_spqZ = new Int32Array(AI_SPQ_MAX);
+const AI_spqY = new Float64Array(AI_SPQ_MAX);
+const AI_spSeen = new Set();                // ключи узлов заливки (числа, не строки)
+const AI_spFl = new Float64Array(24);       // высоты опоры в клетке
+const AI_spDX = [1,-1,0,0], AI_spDZ = [0,0,1,-1];
+const AI_spPts = [];                        // проверенные точки появления
+const AI_spOk  = [];                        // вердикт по каждой из них
+const AI_spAlt = [];                        // подменные точки, если родные мёртвые
+const AI_spTried = [];                      // позиции, уже рассмотренные как подмена
+let   AI_spAltFor = null;                   // для какого списка спавнов они построены
+
+/* Высоты опоры в точке — ровно те источники, которые перебирает moveVert. */
+function AI_floorsAt(x, z){
+  let n = 0;
+  AI_spFl[n++] = terrainH(x, z);
+  if(typeof RAMPS !== 'undefined' && RAMPS && RAMPS.length && typeof rampAt === 'function'){
+    const rh = rampAt(x, z, 1e9);
+    if(rh !== null && rh !== undefined) AI_spFl[n++] = rh;
+  }
+  for(let i=0;i<BOXES.length && n < AI_spFl.length;i++){
+    const b = BOXES[i];
+    if(x < b.aMin.x-1 || x > b.aMax.x+1 || z < b.aMin.z-1 || z > b.aMax.z+1) continue;
+    const lx = b.lx(x, z), lz = b.lz(x, z);
+    if(Math.abs(lx) >= b.hx + CFG.radius*0.75 || Math.abs(lz) >= b.hz + CFG.radius*0.75) continue;
+    AI_spFl[n++] = b.top;
+  }
+  return n;
+}
+/* Помещается ли боец, стоя здесь: та же капсула, что блокирует moveHoriz. */
+function AI_standAt(x, z, y){
+  const feet = y + 0.02, head = y + CFG.height;
+  for(let i=0;i<BOXES.length;i++){
+    const b = BOXES[i];
+    if(b.top <= feet || b.bot >= head) continue;
+    if(x < b.aMin.x-1 || x > b.aMax.x+1 || z < b.aMin.z-1 || z > b.aMax.z+1) continue;
+    const lx = b.lx(x, z), lz = b.lz(x, z);
+    if(Math.abs(lx) >= b.hx + CFG.radius || Math.abs(lz) >= b.hz + CFG.radius) continue;
+    return false;
+  }
+  return true;
+}
+/* Ближайшая к y опора в точке: локальный обход не должен уводить бойца
+   с яруса — сойти со стены в поисках объезда хуже любого затыка. */
+function AI_floorNear(x, z, y){
+  const n = AI_floorsAt(x, z);
+  let best = null, bd = 1.0;
+  for(let i=0;i<n;i++){
+    const d = Math.abs(AI_spFl[i] - y);
+    if(d < bd){ bd = d; best = AI_spFl[i]; }
+  }
+  return best;
+}
+/* Свободно ли стоять в точке на своём ярусе. */
+function AI_walkAt(x, z, y){
+  const f = AI_floorNear(x, z, y);
+  return (f === null) ? false : AI_standAt(x, z, f);
+}
+/* Ключ узла: клетка плюс округлённая высота. Числом, чтобы Set не плодил строк. */
+function AI_spKey(cx, cz, y){
+  return (((cx + 256) & 1023) << 20) | (((cz + 256) & 1023) << 10) | (((Math.round(y*2) + 96) & 1023));
+}
+/* Заливка от точки. true — нашли огневую позицию или упёрлись в потолок
+   (значит, места вокруг много и запирать бойца нечему). */
+function AI_spawnLive(sx, sz){
+  if(!POSTS.length) return true;
+  AI_spSeen.clear();
+  let n = 0, head = 0;
+  const cx0 = Math.round(sx/AI_SPC), cz0 = Math.round(sz/AI_SPC);
+  const f0 = AI_floorsAt(cx0*AI_SPC, cz0*AI_SPC);
+  let y0 = 1e9;
+  for(let i=0;i<f0;i++) if(AI_spFl[i] < y0 && AI_standAt(cx0*AI_SPC, cz0*AI_SPC, AI_spFl[i])) y0 = AI_spFl[i];
+  if(y0 > 1e8) return true;                 // стоять негде вовсе — не наша беда, не запрещаем
+  AI_spqX[n] = cx0; AI_spqZ[n] = cz0; AI_spqY[n] = y0; n++;
+  AI_spSeen.add(AI_spKey(cx0, cz0, y0));
+  while(head < n){
+    const cx = AI_spqX[head], cz = AI_spqZ[head], y = AI_spqY[head]; head++;
+    const x = cx*AI_SPC, z = cz*AI_SPC;
+    for(let i=0;i<POSTS.length;i++){
+      const p = POSTS[i];
+      if(Math.abs(AI_postY(p) - y) > 2.2) continue;
+      const dx = p.x - x, dz = p.z - z;
+      if(dx*dx + dz*dz < 12.25) return true;         // 3.5 м до позиции — выход есть
+    }
+    for(let d=0; d<4; d++){
+      const nx = cx + AI_spDX[d], nz = cz + AI_spDZ[d];
+      const wx = nx*AI_SPC, wz = nz*AI_SPC;
+      if(Math.abs(wx) > CFG.half || Math.abs(wz) > CFG.half) continue;
+      const fn = AI_floorsAt(wx, wz);
+      for(let i=0;i<fn;i++){
+        const yy = AI_spFl[i];
+        if(Math.abs(yy - y) > CFG.step) continue;
+        const k = AI_spKey(nx, nz, yy);
+        if(AI_spSeen.has(k)) continue;
+        if(!AI_standAt(wx, wz, yy)) continue;
+        AI_spSeen.add(k);
+        if(n >= AI_SPQ_MAX) return true;             // простора хватает — считаем живой
+        AI_spqX[n] = nx; AI_spqZ[n] = nz; AI_spqY[n] = yy; n++;
+      }
+    }
+  }
+  return false;                                      // заливка выдохлась: это мешок
+}
+/* Вердикт по точке появления с кэшем: заливка делается один раз на объект. */
+function AI_spawnOk(sp){
+  for(let i=0;i<AI_spPts.length;i++) if(AI_spPts[i] === sp) return AI_spOk[i];
+  const ok = AI_spawnLive(sp.x, sp.z);
+  AI_spPts.push(sp); AI_spOk.push(ok);
+  return ok;
+}
+/* Подмена: ближайшие к мёртвому карману наземные позиции своей половины.
+   Именно так база и задумана — двор замка, а не щель за донжоном. */
+function AI_altSpawns(SP){
+  if(AI_spAltFor === SP) return AI_spAlt;
+  AI_spAltFor = SP;
+  AI_spAlt.length = 0;
+  let cx = 0, cz = 0;
+  for(let i=0;i<SP.length;i++){ cx += SP[i].x; cz += SP[i].z; }
+  if(SP.length){ cx /= SP.length; cz /= SP.length; }
+  const side = (cz >= 0) ? 1 : -1;
+  AI_spTried.length = 0;
+  // Наземные позиции своей половины по близости к карману, пока не наберём
+  // четыре живые: больше точек появления отделению всё равно не нужно.
+  for(let guard=0; guard<14 && AI_spAlt.length < 4; guard++){
+    let bestD = 1e18, best = null;
+    for(let i=0;i<POSTS.length;i++){
+      const p = POSTS[i];
+      if(AI_postLevel(p) !== 0 || p.z*side < 0) continue;
+      let seen = false;
+      for(let k=0;k<AI_spTried.length;k++) if(AI_spTried[k] === p){ seen = true; break; }
+      if(seen) continue;
+      const d = (p.x-cx)*(p.x-cx) + (p.z-cz)*(p.z-cz);
+      if(d < bestD){ bestD = d; best = p; }
+    }
+    if(!best) break;
+    AI_spTried.push(best);
+    if(AI_spawnOk(best)) AI_spAlt.push(best);
+  }
+  return AI_spAlt;
+}
+
+/* =============== ОБЩАЯ ПАМЯТЬ О НЕДОСТИЖИМЫХ ПОЗИЦИЯХ ===============
+   Личный чёрный список бойца не спасает от системной беды: если на позицию
+   не ведёт ни один проход (на «Осаде» так вышло со всем верхом замка —
+   марши двор→стена собраны сплошными ступенями по метру и наклонной
+   коллизии не получили), к ней по очереди сходит ВСЁ отделение, и каждый
+   потратит на дорогу свой срок. За матч это десятки потерянных секунд на
+   бойца — ровно то, что выглядит как «боты бесконечно в пути».
+
+   Поэтому срывы считаем по самой точке: два подряд — и она выключена для
+   всех, дальше срок растёт. Удачное прибытие обнуляет счётчик, так что
+   временный затор (кто-то стоял в дверях) позицию навсегда не хоронит. */
+const AI_pfP = [], AI_pfN = [], AI_pfT = [];
+function AI_pfSlot(p, make){
+  for(let i=0;i<AI_pfP.length;i++) if(AI_pfP[i] === p) return i;
+  if(!make) return -1;
+  AI_pfP.push(p); AI_pfN.push(0); AI_pfT.push(0);
+  return AI_pfP.length - 1;
+}
+function AI_postDead(p){
+  const i = AI_pfSlot(p, false);
+  return i >= 0 && AI_pfT[i] > game.time;
+}
+function AI_postFailed(p, noLift){
+  if(!p) return;
+  const i = AI_pfSlot(p, true);
+  AI_pfN[i]++;
+  // Первый срыв мог быть случайностью (кто-то стоял в дверях), но проверять
+  // это всем отделением по очереди — роскошь ценой в полматча: выключаем
+  // точку сразу, ненадолго, а с каждым новым срывом срок растёт.
+  AI_pfT[i] = game.time + (AI_pfN[i] === 1 ? 16 : 30 + AI_pfN[i]*20);
+  // Соседние точки того же яруса — это почти всегда то же сооружение. Если на
+  // башню не поднялись с одной стороны, второе окно той же башни ничем не
+  // лучше: гасим их, чтобы отделение не проверяло их по очереди, тратя на
+  // каждую по целому маршу.
+  //   noLift — боец так и остался внизу, то есть подъёма на ярус тут нет
+  //   вовсе. Тогда бессмысленны и все площадки НЕ НИЖЕ этой в округе: наверх
+  //   ведёт один и тот же ход, и его на карте не оказалось.
+  const lv = AI_postLevel(p);
+  if(lv <= 0) return;
+  const R = noLift ? 26 : 14, T = noLift ? 26 : 12;
+  for(let k=0;k<POSTS.length;k++){
+    const q = POSTS[k];
+    const lq = AI_postLevel(q);
+    if(q === p || (noLift ? lq < lv : lq !== lv)) continue;
+    if(Math.hypot(q.x - p.x, q.z - p.z) > R) continue;
+    const j = AI_pfSlot(q, true);
+    if(AI_pfT[j] < game.time + T) AI_pfT[j] = game.time + T;
+  }
+}
+function AI_postReached(p){
+  if(!p) return;
+  const i = AI_pfSlot(p, false);
+  if(i >= 0){ AI_pfN[i] = 0; AI_pfT[i] = 0; }
+}
+function AI_postFailReset(){ AI_pfP.length = 0; AI_pfN.length = 0; AI_pfT.length = 0; }
+
 /* ================================ ЦЕЛИ ================================
    Раньше боец знал ровно одного противника — локального `player`. В сети это
    значит, что для ИИ существует только хост, а остальные трое просто гуляют
@@ -95,9 +314,14 @@ function AI_byRank(a, b){ return a._rank - b._rank; }
    Офлайн список ровно из одной записи и повторяет прежние поля один в один,
    поэтому при NET.on === false ни одна формула не меняется.
 
-   Команда решает, кто кому враг: боты играют за RED, значит игроки RED для
-   них союзники, и стрелять по ним нельзя ни при каких обстоятельствах. */
-const AI_TEAM  = 1;              // команда ботов (RED)
+   Команда решает, кто кому враг: игроки своей команды для ботов союзники,
+   и стрелять по ним нельзя ни при каких обстоятельствах.
+
+   Раньше здесь стояла константа «боты = RED», и выбор стороны на старте был
+   физически невозможен. Теперь команда ботов — состояние матча: её ставит
+   запуск через aiSetTeam(). Значение по умолчанию оставлено прежним (RED),
+   поэтому сборка, где aiSetTeam никто не зовёт, ведёт себя ровно как раньше. */
+let AI_TEAM = 1;                 // команда ботов: 0 = BLU, 1 = RED
 const AI_tgts  = [];             // цели текущего кадра
 const AI_tpool = [];             // сами записи: заводятся только на новых игроков
 const AI_ids   = [];             // id удалённых; пересобираем редко, не каждый кадр
@@ -125,6 +349,69 @@ function AI_teamOf(t){
   return (t === 1 || t === '1' || t === 'red' || t === 'RED' || t === 'r') ? 1 : 0;
 }
 function AI_foe(t){ return t.team !== AI_TEAM; }
+
+/* ------------------------- КОМАНДА БОТОВ -------------------------
+   Единый источник правды о стороне игрока — game.team (объявлен в
+   60_weapon.js). Читаем его мягко: сборка без этого поля обязана считать
+   игрока за BLU, как было всю жизнь до выбора команд. */
+function AI_playerTeam(){
+  const g = (typeof game !== 'undefined' && game && game.team !== undefined && game.team !== null)
+    ? game.team : 0;
+  return AI_teamOf(g);
+}
+/* Публичное чтение: 75_combat.js решает по нему, враги ему боты или свои. */
+function aiTeam(){ return AI_TEAM; }
+
+/* Команда, которую матч назначит ботам, если её не назвали явно.
+   Офлайн это всегда «противоположная игроку» — ровно то, чего просит заказчик.
+   В сети трогать сторону ботов по своему усмотрению нельзя: реплики ботов у
+   не-хоста строит 94_netplayers.js и красит их в RED, а состав слотов раздаёт
+   сервер. Пока это не часть протокола, в сети остаёмся RED. */
+function aiDefaultTeam(){
+  if(AI_netOn()) return 1;
+  return AI_playerTeam() ^ 1;
+}
+
+/* Установка команды ботов. t — сторона БОТОВ (0 = BLU, 1 = RED); без аргумента
+   берётся aiDefaultTeam(). Зовёт запуск матча ДО пересоздания списка enemies,
+   чтобы новые бойцы сразу родились в своих цветах; уже живущие перекрашиваются
+   здесь же. Возвращает установленную команду. */
+function aiSetTeam(t){
+  const n = (t === undefined || t === null) ? aiDefaultTeam() : AI_teamOf(t);
+  if(n === AI_TEAM) return AI_TEAM;
+  AI_TEAM = n;
+  for(let i=0;i<enemies.length;i++) enemies[i].retint();
+  return AI_TEAM;
+}
+
+function AI_pal(){   return (AI_TEAM === 1) ? PAL.red   : PAL.blu;   }
+function AI_palDk(){ return (AI_TEAM === 1) ? PAL.redDk : PAL.bluDk; }
+/* Подпись бота в киллфиде: цвет и название стороны обязаны совпадать с той
+   командой, за которую он сейчас реально играет, иначе лента врёт. */
+function AI_botTag(){
+  return (AI_TEAM === 1) ? '<span class="r">RED СНАЙПЕР</span>'
+                         : '<span class="b">BLU СНАЙПЕР</span>';
+}
+function AI_meTag(){
+  return (AI_playerTeam() === 1) ? '<span class="r">ВЫ</span>'
+                                 : '<span class="b">ВЫ</span>';
+}
+
+/* Снять модель бойца со сцены целиком. Спрайт точки телеграфа лежит НЕ в
+   группе, а прямо в сцене (так его вешает 50_models.js), поэтому без явного
+   удаления после каждой смены команды на карте оставалась бы висеть чужая
+   красная точка. Геометрия и материалы узлов общие (кэш 50_models.js) —
+   их не трогаем; уничтожаем только то, что mkSniper создал персонально. */
+function AI_dropModel(m){
+  if(!m) return;
+  const U = m.userData;
+  if(U){
+    if(U.dot){ scene.remove(U.dot); if(U.dot.material) U.dot.material.dispose(); }
+    if(U.glint && U.glint.material) U.glint.material.dispose();
+    if(U.laser && U.laser.material) U.laser.material.dispose();
+  }
+  scene.remove(m);
+}
 
 /* Запись цели живёт столько же, сколько игрок: ссылку на неё боец держит
    между кадрами, поэтому переиспользовать слот под другого игрока нельзя. */
@@ -192,8 +479,10 @@ function AI_syncTargets(){
   const L = AI_tgRec(-1);
   L.kind = 0; L.on = true; L.at = game.time;
   L.pid  = net ? NET.id : -1;
-  // В сети хост может играть и за RED — тогда боты его не трогают.
-  L.team = net ? AI_teamOf(NET.team) : 0;
+  // В сети сторону раздаёт сервер, и она авторитетнее меню; офлайн команда
+  // игрока — это его выбор из game.team. Совпадёт с командой ботов — они его
+  // не тронут: AI_foe() работает по одному правилу для всех целей.
+  L.team = net ? AI_teamOf(NET.team) : AI_playerTeam();
   L.alive = player.alive;
   L.x = player.pos.x; L.y = player.pos.y; L.z = player.pos.z;
   L.h = player.h; L.yaw = player.yaw;
@@ -360,6 +649,7 @@ const SQUAD = {
     this.lastKnown.x = 0; this.lastKnown.y = 0; this.lastKnown.z = 0; this.lastKnown.t = -999;
     this.alert = 0; this.still = 0; this._acc = 0; this._at = -1; this._enc = false;
     this.focus = null;
+    AI_postFailReset();              // сроки блокировок привязаны к game.time, а он обнулён
     AI_dropShots();                  // пули прошлого матча ничего заявлять не должны
     const F = AI_focus();
     this._px = F ? F.x : player.pos.x; this._pz = F ? F.z : player.pos.z;
@@ -497,27 +787,13 @@ const SQUAD = {
 class Enemy {
   constructor(id){
     this.id = id;
-    this.m = mkSniper(PAL.red, PAL.redDk);
+    // Цвет — по текущей команде ботов, а не по прибитому RED. Запоминаем, в
+    // какой команде собрана модель: по этой метке retint() решает, надо ли её
+    // пересобирать при смене стороны между матчами.
+    this.mTeam = AI_TEAM;
+    this.m = mkSniper(AI_pal(), AI_palDk());
     scene.add(this.m);
-    const U = this.m.userData;
-
-    // Опорные смещения берём из самой модели: 50_models.js живёт своей
-    // жизнью, и жёстко зашитые 0.86 / 1.24 однажды разъедутся.
-    this.rest = {
-      hip:    U.hips.position.y,
-      torso:  U.torso.position.y,
-      head:   U.head.position.y - U.hips.position.y,
-      armLY:  U.armL.A.position.y - U.hips.position.y,
-      armRY:  U.armR.A.position.y - U.hips.position.y,
-      rifleY: U.rifle.position.y - U.hips.position.y,
-      rifleX: U.rifle.position.x, rifleZ: U.rifle.position.z,
-      rifRx:  U.rifle.rotation.x,
-      aLx: U.armL.A.rotation.x, aLy: U.armL.A.rotation.y, aLz: U.armL.A.rotation.z,
-      aRx: U.armR.A.rotation.x, aRy: U.armR.A.rotation.y, aRz: U.armR.A.rotation.z,
-      eLx: U.armL.E.rotation.x, eRx: U.armR.E.rotation.x
-    };
-    const bolt = U.rifle.userData ? U.rifle.userData.bolt : null;
-    this.boltZ = bolt ? bolt.position.z : 0;
+    this.bindModel();
 
     // тело и физика (контракт сущности из §3.3)
     this.pos = V(0,0,0); this.vel = V(0,0,0);
@@ -537,6 +813,10 @@ class Enemy {
     this.los = false; this.behind = false; this.senseT = 0; this.reported = -99;
     this.post = null; this.avoidPost = null;
     this.path = []; this.pi = 0; this.wpT = 0;
+    // сколько метров до текущей точки маршрута уже отыграно и давно ли
+    this.wpBest = 1e9; this.wpProg = 0; this.wpAt = -1;
+    // локальный обход преграды: куда, сколько ещё и сколько раз за маршрут
+    this.detX = 0; this.detZ = 0; this.detT = 0; this.detN = 0;
     this.wpBuf = [];
     for(let i=0;i<10;i++) this.wpBuf.push({ x:0, z:0, y:0, climb:false });
     this.tmpWP = { x:0, z:0, y:0, climb:false };
@@ -575,6 +855,61 @@ class Enemy {
     this.respawn(true);
   }
 
+  /* ------------------------- модель и её команда -------------------------
+     Опорные смещения берём из самой модели: 50_models.js живёт своей жизнью,
+     и жёстко зашитые 0.86 / 1.24 однажды разъедутся. Вынесено из конструктора
+     отдельно, потому что при смене команды модель пересобирается, и привязку
+     надо снимать заново с новой. */
+  bindModel(){
+    const U = this.m.userData;
+    this.rest = {
+      hip:    U.hips.position.y,
+      torso:  U.torso.position.y,
+      head:   U.head.position.y - U.hips.position.y,
+      armLY:  U.armL.A.position.y - U.hips.position.y,
+      armRY:  U.armR.A.position.y - U.hips.position.y,
+      rifleY: U.rifle.position.y - U.hips.position.y,
+      rifleX: U.rifle.position.x, rifleZ: U.rifle.position.z,
+      rifRx:  U.rifle.rotation.x,
+      aLx: U.armL.A.rotation.x, aLy: U.armL.A.rotation.y, aLz: U.armL.A.rotation.z,
+      aRx: U.armR.A.rotation.x, aRy: U.armR.A.rotation.y, aRz: U.armR.A.rotation.z,
+      eLx: U.armL.E.rotation.x, eRx: U.armR.E.rotation.x
+    };
+    const bolt = U.rifle.userData ? U.rifle.userData.bolt : null;
+    this.boltZ = bolt ? bolt.position.z : 0;
+  }
+
+  /* Перекраска под текущую команду. Менять цвет материалам нельзя: они лежат
+     в общем кэше 50_models.js, один объект на всю сборку, и красный жилет
+     бойца — это тот же материал, что и красный жилет где угодно ещё. Поэтому
+     модель пересобирается. Дорого это только на бумаге: геометрия узлов тоже
+     кэширована по команде, так что второй комплект стоит пары мешей и живёт
+     до конца сессии. Зовётся из aiSetTeam() между матчами. */
+  retint(){
+    if(this.mTeam === AI_TEAM) return;
+    if(this.fireFx){
+      const ch = this.fireFx.children;
+      for(let i=0;i<ch.length;i++) if(ch[i].material) ch[i].material.dispose();
+      this.fireFx = null;             // жил ребёнком старой модели и уходит вместе с ней
+    }
+    AI_dropModel(this.m);
+    this.mTeam = AI_TEAM;
+    this.m = mkSniper(AI_pal(), AI_palDk());
+    scene.add(this.m);
+    this.bindModel();
+    // Новая модель приходит в позе «стоит»: телеграф погашен, шляпа на месте,
+    // положение и разворот — те же, что были у старой.
+    this.m.visible = this.alive;
+    this.m.position.set(this.pos.x, this.pos.y, this.pos.z);
+    this.m.rotation.set(0, this.yaw, 0);
+    const U = this.m.userData;
+    U.laser.visible = false; U.dot.visible = false; U.glint.visible = false;
+    U.hat.visible = true;
+    U.hat.position.set(0, 0.34, 0);
+    U.hat.rotation.set(0, 0, 0);
+    this.poseRest();
+  }
+
   /* ---------------------- геометрия и попадания ---------------------- */
   cy(){ return this.crouch*0.42; }
   center(o){ return o.set(this.pos.x, this.pos.y + 1.12 - this.cy(), this.pos.z); }
@@ -605,7 +940,11 @@ class Enemy {
   }
 
   /* ------------------------------ маршрут ------------------------------ */
-  setPath(){ this.path.length = 0; this.pi = 0; this.wpT = 0; }
+  setPath(){
+    this.path.length = 0; this.pi = 0; this.wpT = 0;
+    this.wpBest = 1e9; this.wpProg = 0; this.wpAt = -1;
+    this.detT = 0; this.detN = 0;
+  }
   /* Точки берём из предвыделенного буфера: маршрут перестраивается часто,
      а мусорить объектами в игровом цикле нельзя. */
   pushWP(x, z, y, climb){
@@ -669,17 +1008,35 @@ class Enemy {
     return false;
   }
   /* Сколько метров дороги бот согласен отдать за позицию. У самого боя хопы
-     короткие, на подходе с базы — длиннее, иначе отделение просто не доедет. */
+     короткие, на подходе с базы — длиннее, иначе отделение просто не доедет.
+
+     Прежняя формула clamp(dT*0.40, 15, 30) была написана под карту вдвое
+     меньше нынешней и давала локальную ловушку сразу с двух сторон. Сверху:
+     на «Осаде» от базы до базы ~150 м, и потолок 30 м оставлял в выборке
+     только точки внутри своей базы — выйти было физически не за чем. Снизу:
+     бюджет ПАДАЛ по мере приближения к цели (в 37 м от боя — те же 15 м), и
+     боец, дошедший до подступа, дальше видел лишь соседний окоп. Теперь
+     бюджет растёт вместе с расстоянием до боя и никогда не опускается ниже
+     одного осмысленного хопа: между соседними гнёздами позиций 20…25 м. */
   routeBudget(){
     const dT = Math.hypot(this.pos.x - this.kx, this.pos.z - this.kz);
-    let b = clamp(dT*0.40, 15, 30);
-    if(this.role === 'rusher') b += 6;
-    if(this.burn > 0 || this.danger > 0.6) b = Math.min(b, 20);
+    // Потолок держим на длине двух перебежек, а не всей карты: хоп должен
+    // умещаться в десяток секунд, иначе «занимать позиции» превращается в
+    // «всегда быть в дороге» — обратная крайность той же беды.
+    let b = clamp(dT*0.55 + 12, 24, 50);
+    if(this.role === 'rusher') b += 8;
+    if(this.burn > 0 || this.danger > 0.6) b = Math.min(b, 24);
     return b;
   }
   /* Позиция не сложилась: вычеркнуть и взять заведомо ближнюю. */
   failPost(){
-    if(this.post) this.avoidAdd(this.post, rnd(9, 17));
+    if(this.post){
+      this.avoidAdd(this.post, rnd(9, 17));
+      // «Так и не поднялся» — отдельный род срыва: он говорит не о конкретной
+      // точке, а о том, что хода наверх в этом месте нет.
+      AI_postFailed(this.post, AI_postLevel(this.post) > 0 &&
+                               AI_postY(this.post) - this.pos.y > 3);
+    }
     this.failN++;
     if(this.failN >= 3){
       // Три срыва подряд — дело уже не в точках, а в том, где стоит сам боец.
@@ -687,16 +1044,19 @@ class Enemy {
       // марш по недостижимым позициям хуже любой посредственной позиции.
       this.failN = 0;
       for(let i=0;i<this.avoidA.length;i++){ this.avoidA[i] = null; this.avoidTs[i] = 0; }
-      this.pickPost(false, 10);
+      this.pickPost(false, 14);
       return;
     }
-    this.pickPost(false, 15);
+    // «Заведомо ближняя» на этой карте — это 22 м, а не 15: гнёзда позиций
+    // разнесены, и с прежним радиусом запасной выбор часто был пустым.
+    this.pickPost(false, 22);
   }
   /* Прибытие засчитываем по факту, а не по «точки маршрута кончились»:
      вейпоинт, проглоченный из-за затыка, не должен выглядеть как позиция. */
   arrive(){
     const p = this.post;
     if(p && Math.hypot(p.x - this.pos.x, p.z - this.pos.z) > 2.6){ this.failPost(); return; }
+    AI_postReached(p);
     this.breaks = 0; this.failN = 0;
     this.go('settle');
   }
@@ -729,33 +1089,52 @@ class Enemy {
     // Снайперу нужна дистанция, штурмовику — наоборот. Дальности умеренные:
     // с 60 м ошибка прицела вдвое больше, чем с 30, и «занял позицию» легко
     // превращается в «сидит и не попадает».
-    const want = role === 'rusher' ? 15 : role === 'flanker' ? 28 : role === 'suppressor' ? 38 : 48;
+    let want = role === 'rusher' ? 15 : role === 'flanker' ? 28 : role === 'suppressor' ? 38 : 48;
+    // Держать дистанцию имеет смысл, пока цель известна. Без свежих сведений
+    // «сорок восемь метров от последней точки» — это своя половина карты и
+    // гарантия, что контакта не будет вовсе: отделение обязано идти в спорную
+    // зону и искать бой, а не караулить пустое место у себя за спиной.
+    if(this.kAge > 8) want *= 0.45;
     const climbOK = Math.random() < 0.25 + D.climb*0.75;
     const budget = maxD || this.routeBudget();
+    // Где боец сам находится относительно боя: без этой величины «продвижение»
+    // не посчитать, а без продвижения отделение навсегда остаётся дома.
+    const dMeT = Math.hypot(this.pos.x - tx, this.pos.z - tz);
 
-    for(let i=0;i<4;i++){ AI_candP[i] = null; AI_candS[i] = -1e9; }
+    for(let i=0;i<AI_candP.length;i++){ AI_candP[i] = null; AI_candS[i] = -1e9; }
     for(let i=0;i<POSTS.length;i++){
       const p = POSTS[i];
       if(p.taken && p.taken !== this) continue;
-      if(this.isAvoided(p)) continue;
+      if(this.isAvoided(p) || AI_postDead(p)) continue;
       const dPl = Math.hypot(p.x - tx, p.z - tz);
       const dMe = Math.hypot(p.x - this.pos.x, p.z - this.pos.z);
       const lvl = AI_postLevel(p);
-      // Цена позиции — это прежде всего дорога к ней. Подъём на ярус считаем
-      // лишними метрами, за выход из бюджета маршрута штрафуем резко: точка,
-      // до которой десять секунд бежать, не позиция, а обещание позиции.
+      // Подъём на ярус считаем лишними метрами дороги.
       const travel = dMe + lvl*5;
       // Ближе желаемой дистанции — почти бесплатно, дальше — дорого: с 80 м
       // бот честно мажет, и «занятая позиция» перестаёт быть угрозой.
       const off = dPl - want;
-      let s = (off > 0 ? -off*0.72 : off*0.28) + AI_postCover(p)*26 + rnd(0, 10) - travel*0.90;
+      // Настоящий ограничитель дороги — бюджет маршрута, а не её линейная цена.
+      // Раньше вес дороги стоял 0.90, и он в одиночку решал весь отбор: любая
+      // точка у себя под ногами била любую точку в спорной зоне на сорок
+      // очков, сколько бы укрытия и прострела та ни давала. Оставляем дороге
+      // роль разумного тай-брейка (0.30) и режем всё, что вылезло за бюджет.
+      let s = (off > 0 ? -off*0.72 : off*0.28) + AI_postCover(p)*26 + rnd(0, 10) - travel*0.30;
       if(travel > budget) s -= (travel - budget)*2.6;
+      // Продвижение к бою: позиция ближе к цели, чем сам боец, — это шаг
+      // вперёд, и он обязан что-то стоить. Ограничение сверху не даёт
+      // слагаемому превратиться в «беги на противника через всю карту»:
+      // дальше своего бюджета боец всё равно не пойдёт.
+      s += clamp(dMeT - dPl, -34, 34)*0.42;
       // Ярус ценен, когда он рядом: лезть имеет смысл ради близкой высоты,
       // а не ради самой высоты на другом конце карты. Зато близкую высоту
       // берём охотно — иначе верхние площадки карты просто выпадают из боя.
+      // «Рядом» здесь — не весь бюджет, а три четверти: подъём стоит времени
+      // сверх дороги, и марш через полбазы ради чужой башни кончается тем,
+      // что боец всю жизнь идёт наверх и ни разу оттуда не стреляет.
       if(lvl > 0){
         if(!climbOK) s -= 30*lvl;                        // этот боец лезть не настроен
-        else if(dMe < budget) s += lvl*(9 + D.climb*8);
+        else if(dMe < budget*0.75) s += lvl*(9 + D.climb*8);
         else s -= 11*lvl;
       }
       if(far && dPl < 26) s -= 45;
@@ -770,9 +1149,9 @@ class Enemy {
         const sd = AI_secDist(AI_bearSec(tx, tz, p.x, p.z), this.wantBear);
         s += (sd === 0) ? 18 : (sd === 1 ? 8 : -6*sd);
       }
-      for(let k=0;k<4;k++){
+      for(let k=0;k<AI_candP.length;k++){
         if(s > AI_candS[k]){
-          for(let j=3;j>k;j--){ AI_candS[j] = AI_candS[j-1]; AI_candP[j] = AI_candP[j-1]; }
+          for(let j=AI_candP.length-1;j>k;j--){ AI_candS[j] = AI_candS[j-1]; AI_candP[j] = AI_candP[j-1]; }
           AI_candS[k] = s; AI_candP[k] = p;
           break;
         }
@@ -782,7 +1161,7 @@ class Enemy {
     // Линия огня решает, но считать её на все POSTS дорого — только финалистам.
     let best = null, bs = -1e9;
     AI_v2.set(tx, Math.max(gh(tx, tz), this.ky) + 1.15, tz);
-    for(let k=0;k<4;k++){
+    for(let k=0;k<AI_candP.length;k++){
       const p = AI_candP[k];
       if(!p) continue;
       AI_v1.set(p.x, AI_postY(p) + 1.5, p.z);
@@ -817,8 +1196,12 @@ class Enemy {
       est += Math.hypot(w.x - ex, w.z - ez); ex = w.x; ez = w.z;
     }
     est += AI_postLevel(best)*6;
-    // 3.6 м/с — реальная скорость с обходами и расталкиванием, а не паспортные 6.2
-    this.postETA = clamp(est/3.6 + 2.5, 4, 14);
+    // 3.6 м/с — реальная скорость с обходами и расталкиванием, а не паспортные 6.2.
+    // Потолок 14 с был подогнан под маленькую карту: честный переход с базы на
+    // подступ занимает больше, и с прежним сроком ЛЮБОЙ дальний марш кончался
+    // «позиция недостижима» ещё на полпути. 17 с — столько стоит самый длинный
+    // хоп, который вообще разрешает бюджет маршрута, плюс обход преграды.
+    this.postETA = clamp(est/3.6 + 3.0, 5, 17);
     this.travelT = 0; this.breaks = 0;
     // отсчёт «сижу тут» начинается заново; на прибытии его перезапустит settle
     this.postT = 0; this.postMax = rnd(18, 30); this.onPost = false;
@@ -877,8 +1260,9 @@ class Enemy {
     let dx = this.pos.x - (from ? from.x : this.kx);
     let dz = this.pos.z - (from ? from.z : this.kz);
     let l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
-    // не в чистое поле, а с уклоном к своей половине (RED — север, z>0)
-    dz = dz*0.75 + 0.25;
+    // не в чистое поле, а с уклоном к своей половине; своя половина зависит
+    // от команды: RED — север (z>0), BLU — юг (z<0)
+    dz = dz*0.75 + ((AI_TEAM === 1) ? 0.25 : -0.25);
     l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
     const lim = CFG.half - 6;
     const tx = clamp(this.pos.x + dx*rnd(9, 17), -lim, lim);
@@ -900,7 +1284,8 @@ class Enemy {
       rx += o.pos.x; rz += o.pos.z; n++;
     }
     if(n){ rx /= n; rz /= n; }
-    else { rx = this.pos.x*0.4; rz = 50; }
+    // некому собираться — откатываемся к своему тылу, а он у команд разный
+    else { rx = this.pos.x*0.4; rz = (AI_TEAM === 1) ? 50 : -50; }
     rx += rnd(-7, 7); rz += rnd(-7, 7);
     // точка сбора обязана быть дальше от игрока, чем текущая
     const dNow = Math.hypot(this.pos.x - this.kx, this.pos.z - this.kz);
@@ -1007,29 +1392,66 @@ class Enemy {
         this.travelT += dt;
         const w = this.wp();
         if(!w){ this.arrive(); break; }
-        const up = w.y - this.pos.y;
-        if((w.climb || up > 1.2) && this.climbWill){
-          const near = Math.hypot(w.x - this.pos.x, w.z - this.pos.z);
-          const here = (near < 1.8) ? AI_climbAt(this.pos.x, this.pos.z, this.pos.y + 0.4) : null;
-          if(here){
-            this.climbZone = here;
-            // Куда лезем — это верх лестницы или следующая точка маршрута,
-            // но не высота подножия: иначе подъём кончается, не начавшись.
-            const nz = this.path[this.pi + 1];
-            let top = (here.y1 === undefined) ? this.pos.y + 3 : here.y1;
-            if(nz && nz.y > top) top = nz.y;
-            if(!w.climb && w.y > top) top = w.y;
-            this.climbTop = top;
-            this.go('climb');
-            break;
+        /* Прогресс по текущей точке маршрута важнее срока на весь маршрут.
+           Боец, который четыре секунды не становится к ней ближе хотя бы на
+           метр, туда уже не дойдёт: стена, обрыв или лестница, которой на
+           карте не оказалось. Раньше это выяснялось только по истечении
+           postETA — до двух десятков секунд бега в никуда на каждую точку и
+           на каждого бойца, и именно так «бот в пути» превращался в
+           постоянное состояние отделения. */
+        // Пока живёт локальный обход, боец идёт к обходной точке, а не к точке
+        // маршрута, и счётчик «не приближаюсь» не тикает: обход — это не
+        // топтание на месте, а единственный способ выйти из вогнутого угла.
+        let det = false;
+        if(this.detT > 0){
+          this.detT -= dt;
+          if(Math.hypot(this.detX - this.pos.x, this.detZ - this.pos.z) < 1.8) this.detT = 0;
+          else det = true;
+        }
+        if(det){
+          this.tmpWP.x = this.detX; this.tmpWP.z = this.detZ; this.tmpWP.y = this.pos.y;
+          this.mv = this.tmpWP;
+          this.wpProg = 0;
+        } else {
+          if(this.pi !== this.wpAt){ this.wpAt = this.pi; this.wpBest = 1e9; this.wpProg = 0; }
+          const dw = Math.hypot(w.x - this.pos.x, w.z - this.pos.z);
+          if(dw < this.wpBest - 1){ this.wpBest = dw; this.wpProg = 0; }
+          else this.wpProg += dt;
+          if(this.wpProg > (this.pi < this.path.length - 1 ? 4.5 : 7)){
+            if(this.pi < this.path.length - 1){ this.pi++; this.wpT = 0; this.wpBest = 1e9; this.wpProg = 0; }
+            else { this.failPost(); break; }
           }
-          const zw = AI_climbAt(w.x, w.z, this.pos.y + 0.4) || AI_climbAt(w.x, w.z, w.y - 0.6);
-          if(zw){
-            // сначала к подножию лестницы, лезть будем уже оттуда
-            this.tmpWP.x = zw.x; this.tmpWP.z = zw.z; this.tmpWP.y = this.pos.y;
-            this.mv = this.tmpWP;
+          const up = w.y - this.pos.y;
+          // Подъём нужен, а лезть боец не настроен — это не «сейчас дойду», а
+          // тупик: он будет бодать стену до конца срока. Бросаем точку сразу.
+          // Перепад по высоте у ДАЛЁКОЙ точки — это ещё и обычный уклон поля,
+          // поэтому по высоте судим, только подойдя вплотную; пометка climb на
+          // точке маршрута говорит о подъёме прямо, и её хватает всегда.
+          if((w.climb || (up > 1.6 && Math.hypot(w.x - this.pos.x, w.z - this.pos.z) < 4)) &&
+             !this.climbWill){ this.failPost(); break; }
+          if((w.climb || up > 1.2) && this.climbWill){
+            const near = Math.hypot(w.x - this.pos.x, w.z - this.pos.z);
+            const here = (near < 1.8) ? AI_climbAt(this.pos.x, this.pos.z, this.pos.y + 0.4) : null;
+            if(here){
+              this.climbZone = here;
+              // Куда лезем — это верх лестницы или следующая точка маршрута,
+              // но не высота подножия: иначе подъём кончается, не начавшись.
+              const nz = this.path[this.pi + 1];
+              let top = (here.y1 === undefined) ? this.pos.y + 3 : here.y1;
+              if(nz && nz.y > top) top = nz.y;
+              if(!w.climb && w.y > top) top = w.y;
+              this.climbTop = top;
+              this.go('climb');
+              break;
+            }
+            const zw = AI_climbAt(w.x, w.z, this.pos.y + 0.4) || AI_climbAt(w.x, w.z, w.y - 0.6);
+            if(zw){
+              // сначала к подножию лестницы, лезть будем уже оттуда
+              this.tmpWP.x = zw.x; this.tmpWP.z = zw.z; this.tmpWP.y = this.pos.y;
+              this.mv = this.tmpWP;
+            } else this.mv = w;
           } else this.mv = w;
-        } else this.mv = w;
+        }
         if(this.los && this.stateT > 0.25 && this.seeT > this.reactNeed*1.3 && this.canBreak()){
           this.breaks++; this.breakT = game.time; this.go('aim'); break;
         }
@@ -1037,11 +1459,17 @@ class Enemy {
         // добиваем последние метры, а не бросаем позицию в двух шагах.
         if(this.travelT > this.postETA){
           const p = this.post;
-          const dp = p ? Math.hypot(p.x - this.pos.x, p.z - this.pos.z) : 99;
-          // …но продлевать бесконечно нельзя: боец, топчущийся в трёх метрах
-          // от точки, — это та же недостижимость, только медленная.
-          if(dp > 4 || this.postETA > 16) this.failPost();
-          else this.postETA += 2;
+          // Дистанцию здесь меряем в трёх измерениях: боец, стоящий у подножия
+          // башни, «в двух метрах» только на карте, а на деле не поднялся ни
+          // на метр — продлевать ему срок незачем.
+          const dp = p ? Math.hypot(p.x - this.pos.x, AI_postY(p) - this.pos.y, p.z - this.pos.z) : 99;
+          // Пока боец реально приближается, срок продлеваем: обход преграды —
+          // это дорога, а не простой, и на карте со стенами и воротами прямая
+          // никогда не равна пути. …но продлевать бесконечно нельзя: боец,
+          // топчущийся в трёх метрах от точки, — та же недостижимость, только
+          // медленная.
+          if(this.postETA < 26 && (dp <= 4 || this.wpProg < 2)) this.postETA += 3;
+          else this.failPost();
         }
         break;
       }
@@ -1194,6 +1622,59 @@ class Enemy {
     }
   }
 
+  /* ------------------------- локальный обход -------------------------
+     Скольжение вдоль преграды выводит из простого угла, но не из вогнутого,
+     а именно такой у замковых ворот: щека воротной башни выступает НАРУЖУ
+     створа, и боец, идущий к воротам с внутренней стороны, упирается в
+     карман, где обе стороны обхода заблокированы. Оттуда надо сперва отойти
+     ОТ цели, и никакое локальное скольжение этого не придумает.
+
+     Поэтому ищем в кольце ближайшую к цели точку, до которой есть прямой
+     проход (проверяем и саму точку, и коридор до неё теми же габаритами,
+     что у физики), и идём сначала туда. Считается только в момент затыка. */
+  detour(mv){
+    if(!mv) return false;
+    const y = this.pos.y, R = 7, lim = CFG.half - 3;
+    let bx = 0, bz = 0, bs = -1e9;
+    for(let k=0;k<12;k++){
+      const a = k*(Math.PI/6), dx = Math.cos(a), dz = Math.sin(a);
+      const tx = this.pos.x + dx*R, tz = this.pos.z + dz*R;
+      if(Math.abs(tx) > lim || Math.abs(tz) > lim) continue;
+      const s = -Math.hypot(mv.x - tx, mv.z - tz);
+      if(s <= bs) continue;                      // хуже уже найденной — и проверять нечего
+      if(!AI_walkAt(tx, tz, y)) continue;
+      let ok = true;
+      for(let t=0.35; t<0.99 && ok; t+=0.32)
+        if(!AI_walkAt(this.pos.x + dx*R*t, this.pos.z + dz*R*t, y)) ok = false;
+      if(!ok) continue;
+      bs = s; bx = tx; bz = tz;
+    }
+    if(bs < -1e8) return false;
+    this.detX = bx; this.detZ = bz; this.detT = 2.4; this.detN++;
+    return true;
+  }
+
+  /* В какую сторону обходить преграду. Пробуем обе теми же габаритами, что и
+     физика: свободная сторона важнее короткой, а при равенстве идём туда,
+     откуда цель ближе. Считается только в момент затыка, не в каждом кадре. */
+  pickSide(mv){
+    if(!mv) return (Math.random() < 0.5) ? -1 : 1;
+    let dx = mv.x - this.pos.x, dz = mv.z - this.pos.z;
+    const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
+    let best = 1, bs = -1e9;
+    for(let s = -1; s <= 1; s += 2){
+      const px = -dz*s, pz = dx*s;                 // тот же перпендикуляр, что и в шаге обхода
+      let sc = 0;
+      for(let r = 3.5; r <= 7.5; r += 4){
+        if(AI_standAt(this.pos.x + px*r, this.pos.z + pz*r, this.pos.y)) sc += 10;
+        else sc -= 10;
+      }
+      sc -= Math.hypot(mv.x - (this.pos.x + px*6), mv.z - (this.pos.z + pz*6))*0.30;
+      if(sc > bs){ bs = sc; best = s; }
+    }
+    return best;
+  }
+
   /* ------------------------------ перемещение ------------------------------ */
   locomote(dt){
     // подтягивание на уступ: короткая дуга, а не телепорт
@@ -1268,8 +1749,13 @@ class Enemy {
         this.stuck += dt;
         if(this.stuck > 0.35){
           this.stuck = 0; this.stuckN++;
-          this.side = Math.random() < 0.5 ? -1 : 1;
-          this.sideT = rnd(0.6, 1.1);
+          /* Сторону обхода выбираем ОДИН раз на преграду и держим её до конца
+             манёвра. Прежняя случайная сторона каждые полсекунды годилась для
+             ящика посреди поля, но на длинной стене давала болтанку у самой
+             преграды: боец с одинаковым усердием ходил то влево, то вправо и
+             так и не доходил до ворот, хотя они в десяти метрах. */
+          if(this.sideT <= 0){ this.side = this.pickSide(mv); this.sideT = rnd(2.4, 3.6); }
+          else this.sideT = Math.max(this.sideT, 1.2);
           // невысокий уступ разумнее перелезть, чем обходить его кругом
           const mm = AI_mantleFind(this, -Math.sin(this.moveYaw), -Math.cos(this.moveYaw));
           if(mm){
@@ -1277,10 +1763,16 @@ class Enemy {
             this.mantleTo.set(mm.x, mm.y, mm.z);
             this.mantleT = CFG.mantleTime;
             this.stuckN = 0; this.sideT = 0;
+          } else if(this.detT <= 0 && this.detN < 4 && this.detour(mv)){
+            // вдоль преграды не вышло — уходим в локальный обход
+            this.stuckN = 0; this.sideT = 0;
           } else if(this.stuckN > 3){ this.stuckN = 0; this.failPost(); }
         }
       } else this.stuck = Math.max(0, this.stuck - dt*1.5);
-      if(this.wpT > 7.5){ this.wpT = 0; this.pi++; }   // точка недостижима — дальше по маршруту
+      // Пропускаем по сроку только ПРОМЕЖУТОЧНУЮ точку: последняя — это сама
+      // позиция, и «проглотить» её значит доложить о прибытии посреди поля.
+      // На большой карте один перегон честно занимает больше прежних 7.5 с.
+      if(this.wpT > 9 && this.pi < this.path.length - 1){ this.wpT = 0; this.pi++; }
     }
     this.walkT += moved*3.4;
   }
@@ -1604,15 +2096,18 @@ class Enemy {
     }
     if(net) return;                 // счёт, лента и конец матча в сети — дело сервера
 
+    // Подписи сторон берём из текущих команд: лента, где BLU-бот записан в
+    // RED, читается как ошибка счёта, а не как опечатка.
+    const feed = AI_meTag() + ' ✖ ' + AI_botTag();
     if(part === 'head'){
-      addFeed('<span class="b">ВЫ</span> ✖ <span class="r">RED СНАЙПЕР</span> <span class="w">· ХЕДШОТ</span>');
+      addFeed(feed + ' <span class="w">· ХЕДШОТ</span>');
       toast('КРИТИЧЕСКОЕ ПОПАДАНИЕ', Math.round((at || this.pos).distanceTo(player.pos)) + ' М · В ГОЛОВУ');
     } else {
       let tag = '';
       if(part === 'splash') tag = ' <span class="w">· ФУГАС</span>';
       else if(part === 'burn') tag = ' <span class="w">· ОГОНЬ</span>';
       else if(pn) tag = ' <span class="w">· ' + pn + '</span>';
-      addFeed('<span class="b">ВЫ</span> ✖ <span class="r">RED СНАЙПЕР</span>' + tag);
+      addFeed(feed + tag);
     }
     updateScore();
     if(game.kills >= CFG.killGoal) endGame(true);
@@ -1624,9 +2119,25 @@ class Enemy {
     // лотерея. В сети «противник» не один, поэтому меряем до ближайшего.
     this.tgt = null;
     const T = AI_targets();
+    // Появляемся на СВОЕЙ базе. Пустой список — не повод падать: берём чужой,
+    // на карте без половины спавнов лучше стоять не там, чем нигде.
+    let SP = (AI_TEAM === 1) ? SPAWNS_RED : SPAWNS_BLU;
+    if(!SP || !SP.length) SP = (AI_TEAM === 1) ? SPAWNS_BLU : SPAWNS_RED;
+    // Точка появления обязана быть связана с картой. Если все родные точки
+    // оказались мешком (см. AI_spawnLive), выходим на ближайшие наземные
+    // позиции своей половины: бой без отделения хуже неканоничного респавна.
+    if(SP && SP.length){
+      let live = false;
+      for(let i=0;i<SP.length && !live;i++) if(AI_spawnOk(SP[i])) live = true;
+      if(!live){
+        const alt = AI_altSpawns(SP);
+        if(alt.length) SP = alt;
+      }
+    }
     let best = null, bd = -1e9;
-    for(let i=0;i<SPAWNS_RED.length;i++){
-      const s = SPAWNS_RED[i];
+    for(let i=0;i<SP.length;i++){
+      const s = SP[i];
+      if(SP !== AI_spAlt && !AI_spawnOk(s)) continue;   // мёртвые точки пропускаем
       let near = 1e9;
       for(let j=0;j<T.length;j++){
         const q = T[j];
@@ -1638,7 +2149,7 @@ class Enemy {
       const d = near + rnd(0, 25);
       if(d > bd){ bd = d; best = s; }
     }
-    if(!best) best = {x:0, z:60, y:gh(0,60)};
+    if(!best){ const hz = (AI_TEAM === 1) ? 60 : -60; best = {x:0, z:hz, y:gh(0,hz)}; }
     // высоту берём по рельефу: площадки баз могут уехать при правках террейна
     const gy = gh(best.x, best.z);
     this.pos.set(best.x, Math.max(best.y === undefined ? gy : best.y, gy) + 0.2, best.z);

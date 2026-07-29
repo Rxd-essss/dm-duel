@@ -77,6 +77,149 @@ function clearHudTimers(){
   HUD_dmgA = -1; HUD_dmgT = 0;
 }
 
+/* ============================ СТОРОНА ИГРОКА ============================
+   На «Осаде» стороны устроены по-разному — камень против лесов, — поэтому
+   выбор стороны это выбор рисунка боя, и он обязан читаться и до боя, и в бою.
+
+   Раньше весь HUD исходил из «игрок всегда BLU, боты всегда RED»: фраги
+   ложились в синюю плашку, смерти — в красную, «ВЫ» в ленте красилось синим
+   при любом раскладе. Теперь плашки означают именно команды, а куда лечь
+   нашим фрагам — решает game.team.
+
+   Единый источник правды — game.team (литерал объявлен в 60_weapon.js).
+   Пишут его двое: офлайн — выбор в брифинге, в сети — сервер (NETCONTRACT §6:
+   команду назначает комната, пожеланий клиента протокол не несёт). Кто из
+   двоих главнее, решается ровно здесь, в playerTeam(). */
+const HUD_LS_TEAM = 'dmduel.team';
+const HUD_TEAMS = [
+  { tag:'BLU', place:'ОСАДНЫЙ ЛАГЕРЬ' },
+  { tag:'RED', place:'ЗАМОК' }
+];
+let HUD_wantTeam  = 0;    // выбор игрока в брифинге; сервер его не затирает
+let HUD_teamLock  = -1;   // команда, назначенная сервером; -1 — выбираем сами
+let HUD_teamShown = -1;   // что уже нарисовано; -1 — перерисовать
+let HUD_goalShown = -1;
+let HUD_uiReady   = false;
+
+/* NET_ACTIVE и NET живут в модулях, которых в сборке может не быть вовсе, а на
+   верхнем уровне (наш init) NET_ACTIVE ещё во временной мёртвой зоне. Оба
+   случая дают ReferenceError, и оба означают одно: сети нет. */
+function HUD_netTeam(){
+  try{ if(NET_ACTIVE && NET.on) return (NET.team|0) === 1 ? 1 : 0; }catch(e){}
+  return -1;
+}
+function HUD_goal(){
+  try{ if(NET_ACTIVE && NET.on && NET.goal > 0) return NET.goal|0; }catch(e){}
+  return CFG.killGoal;
+}
+/* Эффективная сторона игрока, 0 = BLU, 1 = RED. Заодно синхронизирует
+   game.team: читателю (респавн, ИИ, счёт) не должно быть важно, сетевой мы
+   сейчас или нет — он смотрит одно поле и получает верный ответ. */
+function playerTeam(){
+  const n = HUD_netTeam();
+  const t = n >= 0 ? n : ((game.team|0) === 1 ? 1 : 0);
+  if((game.team|0) !== t) game.team = t;
+  return t;
+}
+function foeTeam(){ return playerTeam() ^ 1; }
+function teamTag(t){ return (t|0) === 1 ? 'RED' : 'BLU'; }
+function teamFeedCls(t){ return (t|0) === 1 ? 'r' : 'b'; }
+
+/* Перекраска HUD под сторону. Зовётся из updateScore и из кадрового
+   updateAmmoHUD, поэтому первым делом — дешёвая проверка «ничего не изменилось»:
+   сторона меняется раз в бой, цель матча — и того реже. */
+function HUD_applyTeam(){
+  const t = playerTeam(), g = HUD_goal();
+  if(t === HUD_teamShown && g === HUD_goalShown) return t;
+  const swapped = (t !== HUD_teamShown);
+  HUD_teamShown = t; HUD_goalShown = g;
+  const T = HUD_TEAMS[t];
+  const h = $('hud');   if(h) h.classList.toggle('tRed', t === 1);
+  const b = $('scBlu'); if(b) b.classList.toggle('mine', t === 0);
+  const r = $('scRed'); if(r) r.classList.toggle('mine', t === 1);
+  const os = $('objSide');
+  if(os){ os.textContent = T.tag; os.classList.toggle('red', t === 1); }
+  const ot = $('objTxt');
+  if(ot) ot.textContent = T.place + '  •  ДО ' + g + ' ФРАГОВ';
+  // плашки счёта поменялись ролями — закешированные числа в них больше не про то
+  if(swapped){ HUD_scB = -1; HUD_scR = -1; HUD_paintTeamSel(); }
+  return t;
+}
+/* Публичный сеттер: поставить сторону и перекрасить всё разом. */
+function setTeamHUD(team){
+  const t = (team|0) === 1 ? 1 : 0;
+  if((game.team|0) !== t) game.team = t;
+  HUD_teamShown = -1;
+  HUD_applyTeam();
+}
+/* Выбор в брифинге. Запоминаем отдельно от game.team: назначенная сервером
+   команда не должна стирать то, за кого игрок хочет играть офлайн. */
+function teamChoice(){ return HUD_wantTeam; }
+function setTeamChoice(team){
+  HUD_wantTeam = (team|0) === 1 ? 1 : 0;
+  try{ localStorage.setItem(HUD_LS_TEAM, HUD_wantTeam ? '1' : '0'); }catch(e){}
+  if(HUD_teamLock < 0) setTeamHUD(HUD_wantTeam);
+  HUD_paintTeamSel();
+}
+/* Сеть: команду выдал сервер. Карточки перестают быть кнопками и работают
+   подписью. team < 0 (или null) снимает замок и возвращает выбор игроку. */
+function lockTeamChoice(team){
+  const t = (team === null || team === undefined || team < 0) ? -1 : ((team|0) === 1 ? 1 : 0);
+  if(t === HUD_teamLock && HUD_teamShown >= 0) return;
+  HUD_teamLock = t;
+  setTeamHUD(t >= 0 ? t : HUD_wantTeam);
+  HUD_paintTeamSel();
+}
+
+function HUD_paintTeamSel(){
+  const sel = $('teamSel');
+  const shown = HUD_teamLock >= 0 ? HUD_teamLock : HUD_wantTeam;
+  if(sel){
+    sel.classList.toggle('locked', HUD_teamLock >= 0);
+    const bs = sel.querySelectorAll('.tm');
+    for(let i=0;i<bs.length;i++) bs[i].classList.toggle('on', (+bs[i].dataset.t|0) === shown);
+  }
+  const net = $('teamNet');
+  if(net){
+    net.classList.toggle('hide', HUD_teamLock < 0);
+    if(HUD_teamLock >= 0)
+      net.innerHTML = 'КОМАНДУ ВЫДАЛ СЕРВЕР: <b>' + HUD_TEAMS[HUD_teamLock].tag +
+                      '</b>. В сетевом бою комната делит стороны сама, и выбор в брифинге не действует.';
+  }
+  const btn = $('playBtn');
+  if(btn) btn.textContent = 'В БОЙ ЗА ' + HUD_TEAMS[shown].tag;
+}
+
+function HUD_bindTeamUI(){
+  const sel = $('teamSel'); if(!sel) return;
+  const bs = sel.querySelectorAll('.tm');
+  for(let i=0;i<bs.length;i++){
+    const b = bs[i];
+    // замок проверяем в обработчике, а не снятием onclick: состояние сети
+    // меняется в любой момент, и пересобирать привязки на каждое сообщение глупо
+    b.onclick = ()=>{ if(HUD_teamLock < 0) setTeamChoice(+b.dataset.t); };
+  }
+}
+
+/* Разметку брифинга поднимаем сами: bindUI() из 90_game.js про выбор стороны
+   не знает, а трогать чужой модуль ради одной привязки нельзя. Вызов
+   идемпотентен — скрипт стоит в конце body, разметка уже разобрана. */
+function hudInit(){
+  if(HUD_uiReady) return;
+  if(typeof document === 'undefined' || !$('teamSel')) return;
+  HUD_uiReady = true;
+  let saved = null;
+  try{ saved = localStorage.getItem(HUD_LS_TEAM); }catch(e){}   // приватный режим — не повод падать
+  HUD_wantTeam = (saved === '1') ? 1 : 0;
+  // высоты этажей в брифинге берём из CFG: две цифры, разъехавшиеся с картой,
+  // хуже, чем их отсутствие
+  const f1 = $('mapF1'); if(f1) f1.textContent = (+CFG.floor1).toFixed(1);
+  const f2 = $('mapF2'); if(f2) f2.textContent = String(+CFG.floor2);
+  HUD_bindTeamUI();
+  setTeamHUD(HUD_wantTeam);
+  HUD_paintTeamSel();
+}
+
 /* ------------------------------ ЗДОРОВЬЕ ------------------------------ */
 function updateHP(){
   const hp = Math.max(0, Math.round(player.hp));
@@ -214,6 +357,9 @@ function HUD_updateAim(dt, a, cooling){
 /* ---------------------- ПОЯС, ОТКАТЫ, СЧЁТЧИКИ ---------------------- */
 function updateAmmoHUD(){
   HUD_bind();
+  // сторона могла смениться между кадрами (сервер прислал команду) — проверка
+  // стоит одно сравнение, зато HUD не остаётся покрашенным в чужой цвет
+  HUD_applyTeam();
   const a = A();
   const cds = wpn.cd || HUD_NOCD;
 
@@ -299,12 +445,43 @@ function updateAmmoHUD(){
 }
 
 /* ------------------------------ СЧЁТ ------------------------------ */
+/* Плашки счёта означают команды, а не «мои фраги / мои смерти»: раньше фраги
+   игрока безусловно шли в синюю, и за RED панель врала в обе стороны. Офлайн
+   смерти игрока — это и есть фраги противоположной стороны, других источников
+   очков у неё нет; в сети командный счёт живёт отдельно (#netTeams), а здесь
+   остаётся личная дуэль — но уже в правильных цветах. */
+let HUD_scB = -1, HUD_scR = -1;
 function updateScore(){
-  $('scBlu').textContent = game.kills; $('scRed').textContent = game.deaths;
+  const my = HUD_applyTeam();
+  const mine = game.kills|0, theirs = game.deaths|0;
+  const blu = my === 1 ? theirs : mine;
+  const red = my === 1 ? mine   : theirs;
+  if(blu !== HUD_scB){ HUD_scB = blu; $('scBlu').textContent = blu; }
+  if(red !== HUD_scR){ HUD_scR = red; $('scRed').textContent = red; }
+}
+/* Единственная правка, которую addFeed имеет право вносить, — нейтрализация
+   МИРОВЫХ причин смерти. Огонь, фугас, падение — не команда, но авторы строк
+   обязаны хоть как-то их покрасить: 75_combat.js берёт цвет чужой стороны
+   (для него это просто «не мы»), 92_net.js пишет их красным всегда. В ленте
+   это читается как чужой фраг — «меня кто-то застрелил», хотя убил очаг или
+   собственный фугас. Сводим такие строки к нейтральному золоту.
+
+   ЦВЕТА КОМАНД НЕ ТРОГАЕМ И ТРОГАТЬ НЕЛЬЗЯ. Здесь стоял переворот классов
+   b<->r и подписи «RED СНАЙПЕР» для игры за RED. Он был нужен ровно до тех
+   пор, пока лента собиралась намертво под «игрок — BLU, боты — RED». Сейчас
+   AI_meTag/AI_botTag (70_ai.js) и CMB_meTag/CMB_botTag (75_combat.js) сами
+   выдают класс по команде игрока и по команде ботов, а сетевые строки несут
+   настоящие команды игроков. Любая перекраска здесь переворачивает уже верные
+   цвета: при игре за RED «ВЫ» уезжало в синий, а BLU-бот — в красный, то есть
+   подпись говорила «BLU СНАЙПЕР» красными буквами. Лента обязана оставаться
+   прозрачной для цвета — цвет назначает автор строки. */
+const HUD_FEED_WORLD = /<span class="[br]">(ОГОНЬ|ФУГАС|ПАДЕНИЕ|МИР)<\/span>/g;
+function HUD_feedFix(html){
+  return String(html).replace(HUD_FEED_WORLD, '<span class="w">$1</span>');
 }
 function addFeed(html){
   const f = $('feed');
-  const d = document.createElement('div'); d.className='fe'; d.innerHTML=html;
+  const d = document.createElement('div'); d.className='fe'; d.innerHTML=HUD_feedFix(html);
   f.appendChild(d);
   while(f.children.length>5) f.removeChild(f.firstChild);
   HUD_after(()=>{ if(d.parentNode) d.parentNode.removeChild(d); }, 5200);
@@ -433,3 +610,9 @@ function updateWindHUD(){
 }
 
 /* ------------------------------ ИГРОК: ЦИКЛ ------------------------------ */
+
+/* Свой кусок брифинга (выбор стороны) поднимаем на месте: скрипт стоит в конце
+   body, разметка уже разобрана, а bindUI() из 90_game.js про него не знает.
+   Падать здесь нельзя ни при каких условиях — это верхний уровень модуля,
+   и исключение унесло бы с собой всё, что грузится после. */
+try{ hudInit(); }catch(e){}

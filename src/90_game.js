@@ -62,6 +62,9 @@ function initInput(){
   });
   addEventListener('keyup', e=>{ keys[e.code] = false; });
   addEventListener('blur', GM_dropKeys);
+  /* На паузе и в меню цикл рисует не каждый кадр — после смены размера окна
+     в буфере остался бы растянутый старый кадр. Просим перерисовку. */
+  addEventListener('resize', ()=>{ GM_pauseDraw = 2; GM_bgAcc = GM_BG_DT; });
   // свернули вкладку — замираем: иначе бой идёт вслепую, а кадр после возврата гигантский
   document.addEventListener('visibilitychange', ()=>{
     if(document.hidden){ GM_dropKeys(); if(game.state==='play') pauseGame(); }
@@ -88,8 +91,10 @@ function GM_clearFx(){
     }
     FX.nums.length = 0;
   }
-  if(Array.isArray(FX.pool)) for(const it of FX.pool){ if(it && it.m){ it.life = 0; it.m.visible = false; } }
-  if(Array.isArray(FX.decals)) for(const d of FX.decals) if(d) d.visible = false;
+  // мешевые частицы рисуются инстансами, отдельного меша у записи пула больше
+  // нет — гасим их сроком жизни, а не visible
+  if(Array.isArray(FX.pool)) for(const it of FX.pool){ if(it){ it.life = 0; if(it.m) it.m.visible = false; } }
+  if(Array.isArray(FX.decals)) for(const d of FX.decals) if(d && d.visible !== undefined) d.visible = false;
 }
 
 function startGame(){
@@ -136,6 +141,12 @@ function startGame(){
   // позиции освобождаем до перебора ботов: выброшенные боты держали их «занятыми»
   for(const q of POSTS) q.taken = null;
 
+  /* Команду ботов ставим ДО пересборки состава: боты играют за сторону,
+     противоположную игроку, и от неё зависят их цвет и точки респавна.
+     Без этого вызова выбор стороны в брифинге не значит ничего: боты навсегда
+     остаются RED и при игре за RED не считают игрока противником вовсе. */
+  if(typeof aiSetTeam === 'function') aiSetTeam();
+
   // Сколько ботов в бою, в сети решает сервер (свободные слоты), офлайн — сложность
   const botTarget = netOn() ? (NET.botCount|0) : D.bots;
   while(enemies.length > botTarget){ const e=enemies.pop(); scene.remove(e.m); if(e.m.userData.dot) scene.remove(e.m.userData.dot); }
@@ -154,6 +165,10 @@ function pauseGame(){
   if(game.state!=='play') return;
   game.state='pause';
   GM_pauseAt = performance.now();
+  // На паузе мир замер, значит и картинка не меняется — перерисовывать её
+  // 60 раз в секунду незачем. Пары кадров хватает, чтобы в буфере оказался
+  // именно последний кадр боя, дальше цикл рендер не трогает вовсе.
+  GM_pauseDraw = 2;
   $('pause').classList.remove('hide');
   if(document.pointerLockElement) document.exitPointerLock();
   GM_dropKeys();
@@ -176,7 +191,7 @@ function endGame(win){
   const dmg  = Math.round(game.dmgTaken||0);
   const burn = Math.round(game.burnTaken||0);
   const frag = Math.round(game.fragTaken||0);
-  $('endSub').textContent = 'DM_DUEL v3 · '+DIFFS[game.diff].name+
+  $('endSub').textContent = 'DM_DUEL '+VER+' · '+DIFFS[game.diff].name+
     ' · ПОЛУЧЕНО УРОНА '+dmg+' (ОГОНЬ '+burn+' · ФУГАС '+frag+')'+
     ' · ПОДОБРАНО '+(game.picks||0);
   $('eK').textContent = game.kills; $('eD').textContent = game.deaths;
@@ -197,6 +212,13 @@ function endGame(win){
 let GM_last = performance.now();
 let GM_shownSec = -1;          // секунда, уже нарисованная в счётчике времени
 let GM_frame = 0;
+let GM_pauseDraw = 0;          // сколько кадров ещё дорисовать после ухода на паузу
+/* Фон брифинга и экрана итогов: там качаются мостики и дышат жаровни, но это
+   меню, а не бой. Держим его на 30 Гц — половина кадрового времени машины
+   возвращается ровно там, где она не нужна. Время копим, чтобы анимация шла
+   с той же скоростью, а не вдвое медленнее. */
+const GM_BG_DT = 1/30;
+let GM_bgAcc = 0;
 
 /* Сеть опциональна: модули 92/94/96 могут вообще отсутствовать в сборке.
    Флаг обновляется раз в кадр, чтобы горячие пути (баллистика перебирает пули
@@ -253,11 +275,19 @@ function loop(now){
     // таймеры мелких элементов HUD ведёт F; если он их убрал — просто пропускаем
     if(typeof hitT === 'number' && hitT>0){ hitT-=dt; if(hitT<=0) $('hitmark').style.opacity=0; }
     if(typeof toastT === 'number' && toastT>0){ toastT-=dt; if(toastT<=0) $('toast').style.opacity=0; }
-  } else if(game.state!=='pause'){
-    // в брифинге и на итогах мир живёт фоном: качаются мостики, дышат жаровни.
-    // На паузе не обновляем НИЧЕГО — бой обязан замереть целиком.
-    updateMapDynamics(dt);
-    LIGHTS.update(dt, camera.position);
+  } else if(game.state==='pause'){
+    // На паузе не обновляем и не рисуем НИЧЕГО: бой замер, картинка в буфере
+    // уже правильная. Досняв пару кадров после входа в паузу, выходим.
+    if(GM_pauseDraw <= 0) return;
+    GM_pauseDraw--;
+  } else {
+    // Брифинг и итоги: мир живёт фоном, но 30 Гц ему хватает с запасом.
+    GM_bgAcc += dt;
+    if(GM_bgAcc < GM_BG_DT) return;
+    const bdt = GM_bgAcc > 0.1 ? 0.1 : GM_bgAcc;
+    GM_bgAcc = 0;
+    updateMapDynamics(bdt);
+    LIGHTS.update(bdt, camera.position);
   }
 
   // Солнце едет за игроком, поэтому карта тени пересчитывается каждый кадр и
@@ -270,6 +300,64 @@ function loop(now){
   renderer.clearDepth();
   if(game.state==='play' && vmRoot && vmRoot.visible) renderer.render(vmScene, vmCamera);
 }
+
+/* --------------------------- КАЧЕСТВО КАРТИНКИ ---------------------------
+   Раньше в настройках были только тени. Замер боевого кадра в 1280×720
+   (offscreen, AMD Radeon встроенная): тень включена и пересчитывается — 3.85 мс,
+   тень выключена — 2.55 мс. То есть ползунок теней отдаёт максимум треть кадра,
+   а остальные две трети настроить было нечем.
+
+   Ступень качества трогает всё три статьи расхода сразу:
+
+     * плотность пикселей (setPixelCap из 20_render.js) — fill rate. Замер той
+       же сцены: 0.52 Мпикс — 2.27 мс, 0.92 Мпикс — 3.15 мс, 2.07 Мпикс — 4.55 мс;
+     * дальность тени — рамка теневой камеры решает, сколько мешей попадёт
+       в теневой проход: half18 — 3.56 мс против half30 — 3.85 мс;
+     * плотность частиц — живых частиц 134 → 85 → 51, кадр 2.82 → 2.78 → 2.44 мс.
+
+   Вместе ступень «низкое» против «высокое» отдаёт ~2 мс из ~4.5 мс кадра.
+   Урон, звук, свет и логика от ступени не зависят: это настройка графики,
+   а не сложности. */
+const GM_QUAL = [
+  { name:'низкое',  pix:0.75, dens:0.40, sh:0, half:18 },
+  { name:'среднее', pix:1.00, dens:0.70, sh:1, half:24 },
+  { name:'высокое', pix:1.50, dens:1.00, sh:2, half:30 }
+];
+let GM_qual = 2;
+
+/* Рамка теневой камеры принадлежит E1 (20_render.js), публичного сеттера у
+   неё нет — правим поля через проверки, чтобы сборка без солнца не падала. */
+function GM_shadowRange(half){
+  try{
+    if(typeof sun === 'undefined' || !sun || !sun.shadow || !sun.shadow.camera) return;
+    const c = sun.shadow.camera;
+    if(c.left === -half) return;
+    c.left = -half; c.right = half; c.top = half; c.bottom = -half;
+    c.updateProjectionMatrix();
+    // рамка сменилась — старую карту тени можно выкинуть, её всё равно перепишут
+    if(renderer && renderer.shadowMap) renderer.shadowMap.needsUpdate = true;
+  }catch(e){}
+}
+
+function setQuality(level){
+  const i = clamp(level|0, 0, GM_QUAL.length-1);
+  const q = GM_QUAL[i];
+  GM_qual = i;
+  game.quality = i;                       // чтобы интерфейс мог прочитать текущее
+  try{ if(typeof setPixelCap === 'function') setPixelCap(q.pix); }catch(e){}
+  try{ if(typeof FX !== 'undefined' && FX && typeof FX.setDensity === 'function') FX.setDensity(q.dens); }catch(e){}
+  game.shadows = q.sh;
+  try{ if(typeof setShadows === 'function') setShadows(q.sh); }catch(e){}
+  GM_shadowRange(q.half);
+  // ползунок теней — часть той же картины: держим его в согласии со ступенью
+  const sh = $('optSh'), vsh = $('vSh');
+  if(sh) sh.value = q.sh;
+  if(vsh) vsh.textContent = ['выкл','низ','выс'][q.sh];
+  const vq = $('vQ');
+  if(vq) vq.textContent = q.name;
+  return i;
+}
+function qualityLevel(){ return GM_qual; }
 
 /* ------------------------------ СТАРТ ------------------------------ */
 function bindUI(){
@@ -297,6 +385,23 @@ function bindUI(){
   vol.oninput  = ()=>{ SFX.setVol(vol.value/100); $('vVol').textContent = vol.value; };
   sh.oninput   = ()=>{ game.shadows=+sh.value; $('vSh').textContent = ['выкл','низ','выс'][sh.value]; setShadows(+sh.value); };
   sens.oninput(); fovI.oninput(); vol.oninput();
+
+  /* Ступень качества. Разметку добавляет F; пока её нет — просто нечего
+     привязывать, и падать здесь нельзя. Годится и <input type=range>, и
+     <select>, и набор кнопок с data-q. */
+  const q = $('optQ');
+  if(q){
+    q.oninput = q.onchange = ()=> setQuality(+q.value);
+    q.value = GM_qual;
+  }
+  const qbtn = document.querySelectorAll('[data-q]');
+  if(qbtn.length) qbtn.forEach(b=>{
+    b.onclick = ()=>{
+      const lv = setQuality(+b.dataset.q);
+      qbtn.forEach(o=> o.classList.toggle('on', +o.dataset.q === lv));
+    };
+  });
+  game.quality = GM_qual;
 }
 
 /* Пул динамического света обязан существовать ДО buildMap(): карта ставит
@@ -354,7 +459,10 @@ function boot(){
   buildViewmodel();
   initInput();
   bindUI();
-  const s = SPAWNS_BLU[0];
+  /* Фон брифинга берём по выбранной стороне: игрок, выбравший замок, не должен
+     всё меню разглядывать чужой осадный лагерь. */
+  const blist = (typeof playerTeam === 'function' && playerTeam() === 1 && SPAWNS_RED.length) ? SPAWNS_RED : SPAWNS_BLU;
+  const s = blist[0];
   player.pos.set(s.x, Math.max(s.y, terrainH(s.x, s.z)), s.z);
   updateCamera(0.016);
   const ln = document.getElementById('loadNote');

@@ -206,7 +206,22 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 #wind{position:absolute;left:20px;top:14px;padding:6px 10px;display:flex;align-items:center;gap:9px}
 #wind .arw{font-family:var(--ui);font-size:18px;color:var(--gold);transform-origin:50% 50%}
 #wind .txt{font-family:var(--ui);font-size:11px;letter-spacing:.08em;color:var(--paper-dim)}
-#objective{position:absolute;left:20px;top:58px;padding:5px 10px;font-family:var(--ui);font-size:11px;letter-spacing:.08em;color:var(--paper-dim)}
+#objective{position:absolute;left:20px;top:58px;padding:5px 10px;font-family:var(--ui);font-size:11px;letter-spacing:.08em;color:var(--paper-dim);
+  display:flex;align-items:center;gap:8px}
+
+/* ---------- сторона игрока ----------
+   Значок стороны один и тот же везде — в строке задачи, в лобби, в подписи
+   «команду выдал сервер». Игрок обязан узнавать свою команду по одному виду,
+   а не вспоминать, что тут значит синее, а что красное. */
+.tside{font-family:var(--ui);font-size:10px;letter-spacing:.11em;padding:1px 7px 2px;
+  border:2px solid var(--edge);color:#eef6fb;background:linear-gradient(180deg,#5b8aa8,#2f5670)}
+.tside.red{background:linear-gradient(180deg,#c04a4c,#7a2427);color:#fbeeee}
+/* Командный цвет HUD включается ОДНИМ классом на #hud: сторона меняется раз
+   в бой, и один переключатель дешевле, чем правка пяти узлов по месту. */
+#hud.tRed .cross:before,#hud.tRed .cross:after{background:var(--red)}
+#hud.tRed #hpBar{background:linear-gradient(180deg,#d98f8f,#8a3236)}
+/* своя половина счёта — золотая рамка, тот же акцент, что у активного слота пояса */
+#score .s.mine{box-shadow:inset 0 0 0 2px var(--gold)}
 
 /* подсказки и урон */
 #toast{position:absolute;left:50%;top:22%;transform:translateX(-50%);text-align:center;font-family:var(--ui);font-size:30px;color:var(--gold);text-shadow:0 3px 0 rgba(0,0,0,.7);opacity:0;transition:opacity .2s;letter-spacing:.05em}
@@ -238,18 +253,23 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 .screen{position:fixed;inset:0;z-index:30;display:flex;align-items:flex-start;justify-content:center;
   background:radial-gradient(ellipse at 50% 40%,#3a332b 0%,#17150f 70%);padding:20px;overflow:auto}
 .card{width:min(1180px,96vw);padding:0;overflow:hidden;margin:auto}
-.head{padding:13px 26px 10px;background:linear-gradient(180deg,#57493a,#332c24);border-bottom:2px solid var(--edge);display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+.head{padding:11px 26px 9px;background:linear-gradient(180deg,#57493a,#332c24);border-bottom:2px solid var(--edge);display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
 .head h1{font-family:var(--ui);font-size:40px;letter-spacing:.02em;color:var(--paper);text-shadow:0 3px 0 rgba(0,0,0,.55)}
 .head h1 span{color:var(--amber)}
 .head .sub{font-family:var(--ui);font-size:12px;letter-spacing:.18em;color:var(--paper-dim)}
-/* брифинг v3 длиннее v2 (паркур, откаты) — раскладываем в три колонки,
-   чтобы кнопка «В БОЙ» оставалась на экране ноутбука 1366×768 */
-.body{padding:14px 26px 17px;display:grid;grid-template-columns:1.05fr 1fr .95fr;gap:20px}
+/* брифинг длинный (паркур, откаты, карта, выбор стороны) — раскладываем в три
+   колонки, чтобы кнопка «В БОЙ» оставалась на экране ноутбука 1366×768.
+   Блоки по колонкам разложены не по смыслу, а по высоте: колонки тянутся до
+   самой длинной, и перекос в одну из них тут же выталкивает кнопку за экран. */
+.body{padding:12px 26px 14px;display:grid;grid-template-columns:1.05fr 1fr .95fr;gap:20px}
 @media(max-width:1080px){.body{grid-template-columns:1fr 1fr}}
 @media(max-width:760px){.body{grid-template-columns:1fr}}
 h2.sec{font-family:var(--ui);font-size:13px;letter-spacing:.16em;color:var(--amber);margin:0 0 6px}
-.rows{display:flex;flex-direction:column;gap:4px}
-.row{display:flex;justify-content:space-between;gap:12px;font-size:13.5px;color:var(--paper-dim);border-bottom:1px dashed rgba(255,255,255,.09);padding-bottom:3px}
+/* Шаг строк намеренно плотный: брифинг v4 вырос на карту и выбор стороны, а
+   кнопка «В БОЙ» обязана оставаться на экране ноутбука 1366×768 без прокрутки.
+   Два пикселя на строке дают на девятнадцати строках почти сорок. */
+.rows{display:flex;flex-direction:column;gap:3px}
+.row{display:flex;justify-content:space-between;gap:12px;font-size:13.5px;color:var(--paper-dim);border-bottom:1px dashed rgba(255,255,255,.09);padding-bottom:2px}
 .row b{color:var(--paper);font-weight:600;text-align:right;flex:0 0 auto}
 .ammoCard{border:2px solid var(--edge);background:#231f1a;padding:8px 11px;margin-bottom:7px}
 .ammoCard .n{font-family:var(--ui);font-size:14px;letter-spacing:.06em;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
@@ -265,7 +285,35 @@ h2.sec{font-family:var(--ui);font-size:13px;letter-spacing:.16em;color:var(--amb
 .seg{display:flex;gap:0;border:2px solid var(--edge);width:fit-content}
 .seg button{font-family:var(--ui);font-size:12px;letter-spacing:.08em;padding:8px 16px;border:0;cursor:pointer;background:#332e28;color:var(--paper-dim)}
 .seg button.on{background:linear-gradient(180deg,#c9552f,#8e3a1f);color:#fff}
-.foot{padding:11px 26px 15px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;border-top:2px solid var(--edge);background:#221e19}
+
+/* ---------- выбор стороны в брифинге ----------
+   Не «сегмент из двух слов», а две плотные карточки: стороны здесь разные по
+   характеру (камень против лесов), и выбор обязан читаться как выбор рисунка
+   боя, а не как переключатель цвета. Карточки живут на экране брифинга, вне
+   #hud, но pointer-events возвращаем явно — правило «#hud кликов не ловит»
+   уже один раз стоило нам пояса патронов. */
+#teamSel{display:flex;flex-direction:column;gap:6px;pointer-events:auto}
+.tm{display:block;width:100%;text-align:left;cursor:pointer;font-family:var(--body);
+  padding:7px 11px 8px;background:#231f1a;color:var(--paper-dim);
+  border:2px solid var(--edge);border-left-width:6px;transition:.09s}
+.tm .tn{display:block;font-family:var(--ui);font-size:13px;letter-spacing:.06em;color:var(--paper)}
+.tm .td{display:block;font-size:11.5px;line-height:1.34;margin-top:3px}
+.tm.blu{border-left-color:var(--blu)} .tm.red{border-left-color:var(--red)}
+.tm:hover{filter:brightness(1.14)}
+.tm:focus-visible{outline:3px solid var(--gold);outline-offset:2px}
+.tm.on{box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 3px 0 rgba(0,0,0,.55)}
+.tm.blu.on{background:linear-gradient(180deg,#4d7d9b,#2b4d63);color:#dbeaf5}
+.tm.red.on{background:linear-gradient(180deg,#b34345,#742329);color:#f6dede}
+.tm.on .tn{color:#fff;text-shadow:0 2px 0 rgba(0,0,0,.45)}
+/* В сети сторону назначает сервер, и пожеланий он не принимает (NETCONTRACT §6).
+   Значит карточки обязаны перестать выглядеть кнопками: невыбранная гасится,
+   выбранная остаётся подписью «вот кто вы». */
+#teamSel.locked .tm{cursor:default}
+#teamSel.locked .tm:not(.on){filter:grayscale(.8) brightness(.6)}
+#teamNet{margin-top:8px;font-size:11px;line-height:1.35;color:#8d8574;
+  border-left:3px solid var(--amber);padding-left:8px}
+#teamNet b{color:var(--gold)}
+.foot{padding:10px 26px 13px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;border-top:2px solid var(--edge);background:#221e19}
 .hint{font-size:12px;color:#9d947f}
 .opt{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--paper-dim);margin-bottom:9px}
 .opt input[type=range]{flex:1;accent-color:var(--amber)}

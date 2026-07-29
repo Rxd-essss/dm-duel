@@ -99,12 +99,104 @@ function losClear(a,b){
 }
 const _los = new THREE.Vector3();
 
+/* ============================ РАМПЫ (MAPDESIGN §9) ============================
+   Наклонная аналитическая поверхность вместо набора ступеней. Ступени марша
+   остаются только визуально (solid:false) — коллизию за них держит рампа,
+   поэтому упереться в подступёнок физически не во что.
+
+   Соглашение об осях СОВПАДАЕТ с коробками и с mkStairs(x,z,yaw,...):
+   подъём идёт вдоль локального +x, то есть в мире по (cos yaw, -sin yaw),
+   ширина — вдоль локального +z, то есть по (sin yaw, cos yaw).
+   Значит addRamp(x,z,yaw,...) и mkStairs(x,z,yaw,...) с теми же x,z,yaw
+   описывают один и тот же марш. */
+const RAMPS = [];
+
+/* x,z — центр ОСНОВАНИЯ марша; yaw — направление подъёма; len — длина марша;
+   w — ширина; y0 — высота у основания; y1 — высота наверху.
+   body (необязательный) — набить под поверхностью коробок-«тело марша»:
+   они блокируют пули и взгляд сквозь лестницу, но никогда не мешают шагу,
+   потому что верх каждой лежит НЕ ВЫШЕ поверхности рампы над собой. */
+function addRamp(x, z, yaw, len, w, y0, y1, body){
+  yaw = yaw || 0;
+  len = Math.max(0.05, len); w = Math.max(0.05, w);
+  const co = Math.cos(yaw), si = Math.sin(yaw);
+  const r = {
+    x, z, yaw, len, w, y0, y1,
+    ax: co, az:-si,          // ось подъёма в мире
+    bx: si, bz: co,          // ось ширины в мире
+    k: (y1-y0)/len,          // уклон
+    cx: x + co*len*0.5,      // центр площадки — для отбраковки одним сравнением
+    cz: z - si*len*0.5,
+    r2: 0
+  };
+  const rad = Math.hypot(len*0.5, w*0.5) + CFG.radius + 0.05;
+  r.r2 = rad*rad;
+  RAMPS.push(r);
+  // «тело» марша: без него простреливается насквозь, ведь ступени несплошные
+  if(body){
+    const segs = Math.max(1, Math.round(len/2.2));
+    const mat = (typeof toonT === 'function') ? toonT(PAL.concDk,'stone',1,1) : null;
+    for(let i=0;i<segs;i++){
+      const u0 = i*len/segs, u1 = (i+1)*len/segs;
+      // верх секции — высота рампы у её НИЖНЕГО края: выше поверхности не выйдет
+      const top = y0 + r.k*(r.k >= 0 ? u0 : u1);
+      const bot = Math.min(y0, y1) - 3.0;
+      const mx = x + co*(u0+u1)*0.5, mz = z - si*(u0+u1)*0.5;
+      if(mat) blk(mx, bot, mz, (u1-u0), top-bot, w, mat, yaw, true, true);
+      else BOXES.push(new Box(mx, (bot+top)/2, mz, (u1-u0), top-bot, w, yaw));
+    }
+  }
+  return r;
+}
+/* Высота опоры рампы в точке (x,z), но не выше yMax; null — рампы здесь нет.
+   yMax отсекает то, что висит над головой: под мостом наверх тянуть нельзя.
+   Аллокаций ноль — перебор по массиву на голых числах. */
+function rampAt(x, z, yMax){
+  let best = null;
+  for(let i=0;i<RAMPS.length;i++){
+    const r = RAMPS[i];
+    const gx = x - r.cx, gz = z - r.cz;
+    if(gx*gx + gz*gz > r.r2) continue;                 // грубая отбраковка
+    const ux = x - r.x, uz = z - r.z;
+    const v = ux*r.bx + uz*r.bz;                       // поперёк марша
+    const hw = r.w*0.5 + CFG.radius;
+    if(v < -hw || v > hw) continue;
+    let u = ux*r.ax + uz*r.az;                         // вдоль марша
+    if(u < -CFG.radius || u > r.len + CFG.radius) continue;
+    if(u < 0) u = 0; else if(u > r.len) u = r.len;     // площадки у краёв ровные
+    const h = r.y0 + r.k*u;
+    if(h > yMax) continue;
+    if(best === null || h > best) best = h;
+  }
+  return best;
+}
+
 /* ------------------- ФИЗИКА ПЕРСОНАЖА (общая для всех) ------------------- */
+/* Порог шага один на обе проверки — иначе уступы в зазоре между ними
+   держатся только на запасной ветке и рвутся на бегу. Эпсилон нужен, чтобы
+   уступ ровно в CFG.step не отсекался ошибкой округления высот. */
+const PHYS_STEP = CFG.step + 1e-6;
+
+/* Едет ли сущность ВНУТРЬ коробки: сравниваем скорость с той нормалью,
+   по которой коробка её вытолкнет. Нужно, чтобы прощающий шаг не срабатывал,
+   когда игрок просто сходит с площадки, — там скорость направлена наружу,
+   и подтягивать его обратно на кромку нельзя. */
+function PHYS_intoBox(e, b, lx, lz, px, pz){
+  let nx, nz;
+  if(px < pz){ const s = lx<0?-1:1; nx = s*b.co; nz = -s*b.si; }
+  else       { const s = lz<0?-1:1; nx = s*b.si; nz =  s*b.co; }
+  return (e.vel.x*nx + e.vel.z*nz) < 0;
+}
+
 function moveHoriz(e, dt){
   e.pos.x += e.vel.x*dt; e.pos.z += e.vel.z*dt;
   const lim = CFG.half-1.5;
   e.pos.x = clamp(e.pos.x,-lim,lim); e.pos.z = clamp(e.pos.z,-lim,lim);
   const feet = e.pos.y, head = feet + e.h;
+  /* Прощающая рамка в духе coyote-time: на бегу «строго на земле» рвётся
+     каждый раз, когда под ногами уклон вниз, — а уступ обязан проходиться
+     шагом и в этот момент. Условие: падаем (или зависли) и лезем В препятствие. */
+  const soft = !e.grounded && e.vel.y <= 0;
   e.stepUp = 0;
   for(let i=0;i<BOXES.length;i++){
     const b = BOXES[i];
@@ -113,9 +205,13 @@ function moveHoriz(e, dt){
     let lx = b.lx(e.pos.x, e.pos.z), lz = b.lz(e.pos.x, e.pos.z);
     const ex = b.hx + CFG.radius, ez = b.hz + CFG.radius;
     if(Math.abs(lx) >= ex || Math.abs(lz) >= ez) continue;
-    const rise = b.top - feet;
-    if(e.grounded && rise > 0 && rise <= CFG.step){ if(b.top > e.stepUp) e.stepUp = b.top; continue; }
     const px = ex - Math.abs(lx), pz = ez - Math.abs(lz);
+    const rise = b.top - feet;
+    if(rise > 0 && rise <= PHYS_STEP &&
+       (e.grounded || (soft && PHYS_intoBox(e, b, lx, lz, px, pz)))){
+      if(b.top > e.stepUp) e.stepUp = b.top;
+      continue;
+    }
     const ox = e.pos.x, oz = e.pos.z;
     if(px < pz) lx += (lx<0?-1:1)*px; else lz += (lz<0?-1:1)*pz;
     e.pos.x = b.wx(lx,lz); e.pos.z = b.wz(lx,lz);
@@ -135,19 +231,27 @@ function moveVert(e, dt){
     e.pos.y += e.vel.y*dt;
   }
   const rising = free ? e.vel.y > 0 : e.pos.y > prevY;
+  // единый потолок подъёма опоры за кадр: и для верхов коробок, и для рамп,
+  // и для уступа, найденного moveHoriz. Раньше здесь стояло 0.36 против 0.45
+  // в moveHoriz — ровно этот зазор и держал игрока на подступёнке.
+  const lift = prevY + PHYS_STEP;
   let ground = terrainH(e.pos.x, e.pos.z);
+  if(RAMPS.length){
+    const rh = rampAt(e.pos.x, e.pos.z, lift);
+    if(rh !== null && rh > ground) ground = rh;
+  }
   for(let i=0;i<BOXES.length;i++){
     const b = BOXES[i];
     if(e.pos.x < b.aMin.x-0.6 || e.pos.x > b.aMax.x+0.6 || e.pos.z < b.aMin.z-0.6 || e.pos.z > b.aMax.z+0.6) continue;
     const lx = b.lx(e.pos.x,e.pos.z), lz = b.lz(e.pos.x,e.pos.z);
     if(Math.abs(lx) >= b.hx+CFG.radius*0.75 || Math.abs(lz) >= b.hz+CFG.radius*0.75) continue;
-    if(b.top <= prevY + 0.36 && b.top > ground && e.pos.y <= b.top + 0.02) ground = b.top;
+    if(b.top <= lift && b.top > ground && e.pos.y <= b.top + 0.02) ground = b.top;
     if(rising && b.bot > prevY + e.h - 0.05 && b.bot < e.pos.y + e.h){
       e.pos.y = b.bot - e.h - 0.01;
       if(free) e.vel.y = 0;
     }
   }
-  if(e.stepUp && e.stepUp > ground && e.stepUp - prevY <= CFG.step) ground = e.stepUp;
+  if(e.stepUp !== 0 && e.stepUp > ground && e.stepUp <= lift) ground = e.stepUp;
   if(e.pos.y <= ground){
     e.pos.y = ground;
     if(free && e.vel.y<0){ e.landV = e.vel.y; e.vel.y = 0; }
@@ -240,6 +344,12 @@ function zipNear(pos, maxD){
 function PHYS_surfaceAt(x, z, yMax){
   let top = terrainH(x,z);
   if(top > yMax) return null;
+  // рампа — такая же опора, как верх коробки: на неё можно и подтянуться,
+  // и сойти с лестницы
+  if(RAMPS.length){
+    const rh = rampAt(x, z, yMax);
+    if(rh !== null && rh > top) top = rh;
+  }
   for(let i=0;i<BOXES.length;i++){
     const b = BOXES[i];
     if(x < b.aMin.x-0.1 || x > b.aMax.x+0.1 || z < b.aMin.z-0.1 || z > b.aMax.z+0.1) continue;

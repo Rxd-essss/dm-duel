@@ -27,6 +27,11 @@ let PLR_lastX = 0, PLR_lastY = 0, PLR_lastZ = 0;   // куда паркур по
 let PLR_qHeld = false;
 let PLR_dashX = 0, PLR_dashZ = 0;
 let PLR_prevX = 0, PLR_prevZ = 0;
+/* Сглаживание высоты глаз на уступе. Физика поднимает игрока на ступень
+   мгновенно — иначе он бы в неё упирался, — но мгновенный скачок pos.y
+   читается как рывок камеры. Держим отставание глаз и гасим его за пару
+   кадров. Трогает ТОЛЬКО камеру: pos, коллизии и сетевой пакет не меняются. */
+let PLR_stepOff = 0;
 /* экран смерти: узел ищем один раз, а секунды пишем только когда целое
    поменялось — за смерть это 3 записи вместо 180 */
 let PLR_deadEl = null, PLR_deadShown = -1, PLR_wasAlive = true;
@@ -46,7 +51,7 @@ function PLR_clearParkour(){
   player.mantleT = 0; player.slideT = 0; player.dashT = 0;
   player.noGrav = false; player.jumpBuf = 0; player.coyote = 0;
   player.airJumps = 0;
-  PLR_pushT = 0; PLR_roll = 0; PLR_fovK = 0;
+  PLR_pushT = 0; PLR_roll = 0; PLR_fovK = 0; PLR_stepOff = 0;
   // откаты паркура во время смерти не тикают — обнуляем, иначе на респавне
   // полсекунды нельзя схватиться за трос или лестницу
   PLR_slideCd = 0; PLR_climbLock = 0; PLR_zipLock = 0; PLR_mantleTry = 0;
@@ -83,6 +88,23 @@ function PLR_room(h){
     if(Math.abs(lx) < b.hx+CFG.radius && Math.abs(lz) < b.hz+CFG.radius) return false;
   }
   return true;
+}
+
+/* Сколько высоты «съесть» камерой после кадра движения.
+   Наклон (рампа, склон, рельеф) НЕ сглаживаем: он даёт ровно столько подъёма,
+   сколько объясняется пройденным по горизонтали расстоянием, и лишний лаг
+   камеры там только мешает целиться. Сглаживаем лишь остаток — разрыв,
+   который дал шаг на уступ. */
+function PLR_stepSmooth(yWas, gWas){
+  if(!player.grounded || !gWas) return;      // в полёте и при приземлении сглаживать нечего
+  const dy = player.pos.y - yWas;
+  if(dy === 0) return;
+  const moved = Math.hypot(player.pos.x-PLR_prevX, player.pos.z-PLR_prevZ);
+  const budget = moved*0.65 + 0.02;
+  if(dy > budget)       PLR_stepOff -= (dy - budget);
+  else if(dy < -budget) PLR_stepOff -= (dy + budget);
+  const lim = CFG.step*1.15;
+  PLR_stepOff = clamp(PLR_stepOff, -lim, lim);
 }
 
 function accelerate(wx,wz,maxS,acc,dt){
@@ -377,8 +399,10 @@ function PLR_walkStep(dt){
   /* --- собственно перемещение --- */
   player.landV = 0;
   PLR_prevX = player.pos.x; PLR_prevZ = player.pos.z;
+  const yWas = player.pos.y, gWas = player.grounded;
   moveHoriz(player, dt);
   moveVert(player, dt);
+  PLR_stepSmooth(yWas, gWas);
   if(player.landV < -7){ SFX.land(); player.dip = clamp(-player.landV*0.014, 0, 0.22); shake(0.12); }
 
   /* --- упёрся в уступ на бегу: подтянуться без нажатия ---
@@ -462,6 +486,15 @@ function updatePlayer(dt){
   if(player.jumpBuf > 0) player.jumpBuf -= dt;
   if(player.coyote  > 0) player.coyote  -= dt;
 
+  /* Отставание глаз гасим ДО шага, а не в updateCamera: иначе скачок, найденный
+     в этом же кадре, успевал бы наполовину раствориться и камера всё равно
+     дёргалась бы. Темп догона растёт со скоростью — на спринте по лестнице
+     отставание не должно копиться от ступени к ступени. */
+  if(PLR_stepOff !== 0){
+    const v = (2.6 + Math.hypot(player.vel.x, player.vel.z)*0.55)*dt;
+    PLR_stepOff = PLR_stepOff > 0 ? Math.max(0, PLR_stepOff - v) : Math.min(0, PLR_stepOff + v);
+  }
+
   /* --- ввод --- */
   const sy=Math.sin(player.yaw), cy=Math.cos(player.yaw);
   const fX=-sy, fZ=-cy, rX=cy, rZ=-sy;
@@ -520,7 +553,7 @@ function updateCamera(dt){
   const bobX = Math.sin(player.bobT)*0.028*player.bob;
   camera.position.set(
     player.pos.x + bobX*Math.cos(player.yaw),
-    player.pos.y + player.h - CFG.eye + bobY - player.dip,
+    player.pos.y + player.h - CFG.eye + bobY - player.dip + PLR_stepOff,
     player.pos.z - bobX*Math.sin(player.yaw)
   );
   camera.rotation.order = 'YXZ';

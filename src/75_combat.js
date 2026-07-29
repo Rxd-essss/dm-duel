@@ -137,7 +137,9 @@ function netDamage(fromPos, dmg, hp, part){
 }
 function CMB_netDeathFeed(net){
   const who = net && net.byName ? net.byName : 'ОГОНЬ';
-  return '<span class="r">'+who+'</span> ✖ <span class="b">ВЫ</span>' +
+  // Команду убийцы сервер в пакете не называет, но она известна: команд две,
+  // и убить нас мог только противник. Свою сторону читаем из NET.team.
+  return '<span class="'+CMB_foeCls()+'">'+who+'</span> ✖ ' + CMB_meTag() +
          (net && net.part==='head' ? ' <span class="w">· ХЕДШОТ</span>' : '');
 }
 function netKill(byName, part){ killPlayer({ byName, part }); }
@@ -150,22 +152,52 @@ function netRespawn(x, y, z){
   player.vel.set(0,0,0);
 }
 
+/* ---------------------------- КОМАНДА ИГРОКА ----------------------------
+   Единый источник правды — game.team (0 = BLU, 1 = RED), объявлен в
+   60_weapon.js. В сети сторону раздаёт сервер, и NET.team авторитетнее любого
+   локального выбора, поэтому в сетевом матче читаем его. Поля может не быть
+   вовсе (старая сборка) — тогда игрок BLU, как было до выбора команд. */
+function CMB_teamId(t){
+  return (t === 1 || t === '1' || t === 'red' || t === 'RED' || t === 'r') ? 1 : 0;
+}
+function CMB_myTeam(){
+  if(NET_ACTIVE && NET.team !== undefined && NET.team !== null) return CMB_teamId(NET.team);
+  const g = (typeof game !== 'undefined' && game && game.team !== undefined && game.team !== null)
+    ? game.team : 0;
+  return CMB_teamId(g);
+}
+/* Цвет чужой стороны в ленте: команд ровно две, поэтому «не моя» однозначна. */
+function CMB_foeCls(){ return (CMB_myTeam() === 1) ? 'b' : 'r'; }
+function CMB_meTag(){
+  return (CMB_myTeam() === 1) ? '<span class="r">ВЫ</span>' : '<span class="b">ВЫ</span>';
+}
+/* Команда ботов живёт в 70_ai.js и меняется на старте матча — берём оттуда,
+   а не гадаем по NET.team: боты теперь бывают и BLU. */
+function CMB_botTeam(){ return (typeof aiTeam === 'function') ? aiTeam() : 1; }
+function CMB_botTag(){
+  return (CMB_botTeam() === 1) ? '<span class="r">RED СНАЙПЕР</span>'
+                               : '<span class="b">BLU СНАЙПЕР</span>';
+}
+
 /* Киллфид должен различать пулю, фугас и огонь — иначе смерть от очага
    выглядит как баг («меня никто не стрелял»). */
 function CMB_deathFeed(){
-  if(CMB_cause==='burn')   return '<span class="r">ОГОНЬ</span> ✖ <span class="b">ВЫ</span>';
-  if(CMB_cause==='ФУГАС')  return '<span class="r">ФУГАС</span> ✖ <span class="b">ВЫ</span>';
-  return '<span class="r">RED СНАЙПЕР</span> ✖ <span class="b">ВЫ</span>' +
+  const me = CMB_meTag(), fc = CMB_foeCls();
+  if(CMB_cause==='burn')   return '<span class="'+fc+'">ОГОНЬ</span> ✖ ' + me;
+  if(CMB_cause==='ФУГАС')  return '<span class="'+fc+'">ФУГАС</span> ✖ ' + me;
+  return CMB_botTag() + ' ✖ ' + me +
          (CMB_cause==='В ГОЛОВУ' ? ' <span class="w">· ХЕДШОТ</span>' : '');
 }
 
-/* Дистанция до ближайшего живого противника. Боты играют за RED, поэтому для
-   игрока RED они союзники и от них прятаться незачем; зато в сети рядом со
-   спавном могут стоять живые люди из чужой команды — их берём из NET.players
-   (позиции обновляет снапшот). Респавн зовётся раз в смерть, не в кадре. */
+/* Дистанция до ближайшего живого противника. Боты враждебны, только если их
+   команда не совпала с нашей: игроку, вставшему на сторону ботов, прятаться
+   от них незачем. В сети рядом со спавном могут стоять и живые люди из чужой
+   команды — их берём из NET.players (позиции обновляет снапшот).
+   Респавн зовётся раз в смерть, не в кадре. */
 function CMB_foeDist(x, z){
   let near = 1e9;
-  const botsFoe = !NET_ACTIVE || NET.team !== 1;   // RED-бот врагом RED-игроку не является
+  const my = CMB_myTeam();
+  const botsFoe = (CMB_botTeam() !== my);
   if(botsFoe)
     for(const e of enemies){
       if(!e.alive) continue;
@@ -174,7 +206,7 @@ function CMB_foeDist(x, z){
     }
   if(NET_ACTIVE)
     for(const p of NET.players.values()){
-      if(!p.alive || p.id === NET.id || p.team === NET.team) continue;
+      if(!p.alive || p.id === NET.id || CMB_teamId(p.team) === my) continue;
       const d = Math.hypot(p.x-x, p.z-z);
       if(d < near) near = d;
     }
@@ -182,9 +214,13 @@ function CMB_foeDist(x, z){
 }
 
 function respawnPlayer(){
-  /* Точка появления — по своей команде: в сети RED, поднятый на спавнах BLU,
-     начинал матч внутри чужой базы. Офлайн игрок всегда BLU. */
-  const list = (NET_ACTIVE && NET.team === 1) ? SPAWNS_RED : SPAWNS_BLU;
+  /* Точка появления — по своей команде: RED, поднятый на спавнах BLU, начинал
+     матч внутри чужой базы. Команду берём из общего источника, поэтому офлайн
+     работает выбор в меню, а в сети — назначение сервера. Пустой список чужой
+     стороной не подменяем молча: без своих спавнов лучше встать хоть куда-то. */
+  const my = CMB_myTeam();
+  let list = (my === 1) ? SPAWNS_RED : SPAWNS_BLU;
+  if(!list || !list.length) list = (my === 1) ? SPAWNS_BLU : SPAWNS_RED;
   // спавн подальше от живых врагов: появиться в упор под чужой прицел — не бой, а лотерея
   let best = null, bs = -1e9;
   for(const s of list){

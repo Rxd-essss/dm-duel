@@ -6,7 +6,9 @@
 <!-- ================= HUD ================= -->
 <div id="hud" class="hide">
   <div id="wind" class="panel"><div class="arw" id="windArw">&#10148;</div><div class="txt" id="windTxt">ВЕТЕР 0.0</div></div>
-  <div id="objective" class="panel">DM_DUEL v3 &nbsp;•&nbsp; ДУЭЛЬ ДО 20 ФРАГОВ</div>
+  <!-- Строка задачи несёт сторону игрока: содержимое переписывает HUD при
+       смене команды (setTeamHUD), здесь — только состояние по умолчанию. -->
+  <div id="objective" class="panel"><span class="tside" id="objSide">BLU</span><span id="objTxt">ОСАДНЫЙ ЛАГЕРЬ &nbsp;•&nbsp; ДО 20 ФРАГОВ</span></div>
 
   <div id="score" class="panel">
     <div class="s blu" id="scBlu">0</div>
@@ -77,25 +79,31 @@
   <div class="card panel">
     <div class="head">
       <h1>DM_<span>DUEL</span> v3</h1>
-      <div class="sub">ДУЭЛЬ СНАЙПЕРОВ &nbsp;•&nbsp; BLU vs RED &nbsp;•&nbsp; ЯРУСЫ, МОСТКИ, РУНЫ</div>
+      <div class="sub">ДУЭЛЬ СНАЙПЕРОВ &nbsp;•&nbsp; КАРТА «ОСАДА» &nbsp;•&nbsp; ЗАМОК RED ПРОТИВ ЛАГЕРЯ BLU</div>
     </div>
     <div class="body">
       <div>
         <h2 class="sec">Боекомплект</h2>
         <div class="ammoCard a1"><div class="n" style="color:var(--a1)">1 · МАТЧЕВЫЙ<em>БЕЗ ОТКАТА</em></div>
-          <div class="d">Эталонная баллистика: высокая скорость, минимальное падение и снос ветром.
-            <b>Единственный тип с полным критом в голову</b> — если нужен размен один в один, стреляйте им.</div>
+          <div class="d">Скорость, малое падение и снос. <b>Единственный с полным критом в голову</b>.</div>
           <div class="stat" id="s1"></div></div>
         <div class="ammoCard a2"><div class="n" style="color:var(--a2)">2 · ФУГАСНЫЙ<em>ОТКАТ 2.5 С</em></div>
-          <div class="d">Подрыв при попадании. <b>Крита нет вообще</b> — в голову идёт обычный урон.
-            Работает площадью: максимум в эпицентре, дальше урон падает, за укрытием режется почти вдвое.
-            Тяжёлая пуля заметно проседает — берите выше. Задача — выкурить с точки, а не убить с одного.</div>
+          <div class="d">Подрыв площадью, <b>крита нет вообще</b>: максимум в эпицентре, за укрытием
+            вдвое меньше. Тяжёлая пуля проседает — берите выше.</div>
           <div class="stat" id="s2"></div></div>
         <div class="ammoCard a3"><div class="n" style="color:var(--a3)">3 · ЗАЖИГАТЕЛЬНЫЙ<em>ОТКАТ 5 С</em></div>
-          <div class="d">Прямой урон слабый, но цель <b>горит</b> и продолжает терять здоровье, даже уйдя за угол.
-            Промах оставляет очаг огня — перекрывает подход и лестницу. Самый длинный откат: пять секунд
-            пояс держит его закрытым, следите за заливкой слота.</div>
+          <div class="d">Прямой урон слабый, но цель <b>горит</b> и за углом. Промах оставляет очаг
+            на подходе. Откат пять секунд — следите за слотом.</div>
           <div class="stat" id="s3"></div></div>
+
+        <h2 class="sec" style="margin-top:14px">Правила боя</h2>
+        <div class="rows">
+          <div class="row"><span>Фугасный урон</span><b>без крита, спад от центра</b></div>
+          <div class="row"><span>Урон по корпусу</span><b>растёт с зарядом</b></div>
+          <div class="row"><span>Стрельба без оптики</span><b>большой разброс</b></div>
+          <div class="row"><span>Противник целится</span><b style="color:var(--bad)">луч + блик оптики</b></div>
+          <div class="row"><span>Чужие работают отрядом</span><b style="color:var(--bad)">обход, ярусы, подавление</b></div>
+        </div>
       </div>
       <div>
         <h2 class="sec">Управление</h2>
@@ -126,25 +134,25 @@
         </div>
       </div>
       <div>
-        <h2 class="sec">Подвижность</h2>
-        <div class="rows">
-          <div class="row"><span>Подкат</span><b><kbd>Ctrl</kbd> на бегу</b></div>
-          <div class="row"><span>Подтягивание</span><b>уступ до 2 м берётся сам</b></div>
-          <div class="row"><span>Доп. прыжок</span><b class="arc">эфирный толчок в воздухе</b></div>
-          <div class="row"><span>Рывок <kbd>Q</kbd></span><b class="arc">шкала под дыханием</b></div>
-          <div class="row"><span>Лестницы и тросы</span><b>верхние ярусы и мостки</b></div>
-          <div class="row"><span>Сорваться с края</span><b>прыжок ещё засчитывается</b></div>
+        <!-- Сторона стоит первой и вплотную к сложности: это два решения,
+             которые игрок принимает перед самым нажатием «В БОЙ».
+             Стороны на «Осаде» устроены по-разному, поэтому выбор здесь про
+             рисунок боя, а не про цвет: он ложится в game.team и запоминается.
+             В сети команду назначает комната — карточки становятся подписью
+             (#teamNet), а нажатия игнорируются. -->
+        <h2 class="sec">Сторона</h2>
+        <div id="teamSel">
+          <button type="button" class="tm blu on" data-t="0">
+            <span class="tn">BLU · ОСАДНЫЙ ЛАГЕРЬ</span>
+            <span class="td">Осадные помосты и башня — высота без стен.</span>
+          </button>
+          <button type="button" class="tm red" data-t="1">
+            <span class="tn">RED · ЗАМОК</span>
+            <span class="td">Камень, зубцы, боевой ход кольцом.</span>
+          </button>
         </div>
-        <h2 class="sec" style="margin-top:14px">Правила боя</h2>
-        <div class="rows">
-          <div class="row"><span>Полный крит в голову</span><b style="color:var(--a1)">только матчевым</b></div>
-          <div class="row"><span>Зажигательный в голову</span><b style="color:var(--a3)">×2.2 к урону</b></div>
-          <div class="row"><span>Фугасный урон</span><b>без крита, спад от центра</b></div>
-          <div class="row"><span>Урон по корпусу</span><b>растёт с зарядом</b></div>
-          <div class="row"><span>Стрельба без оптики</span><b>большой разброс</b></div>
-          <div class="row"><span>Противник целится</span><b style="color:var(--bad)">луч + блик оптики</b></div>
-          <div class="row"><span>RED работают отрядом</span><b style="color:var(--bad)">обход, ярусы, подавление</b></div>
-        </div>
+        <div id="teamNet" class="hide"></div>
+
         <h2 class="sec" style="margin-top:14px">Сложность</h2>
         <div class="seg" id="diffSeg">
           <button data-d="easy">НОВОБРАНЕЦ</button>
@@ -152,10 +160,36 @@
           <button data-d="hard">ЛЕГЕНДА</button>
         </div>
         <div class="hint" id="diffHint" style="margin-top:8px"></div>
+
+        <!-- Карта. Коротко и только то, по чему игрок ориентируется в бою:
+             три канонические высоты (MAPDESIGN §1), кто где стоит и чем
+             переходят с этажа на этаж. Стоит сразу под выбором стороны —
+             читается как продолжение того же решения. Числа высот подставляет
+             HUD из CFG: дублировать их текстом значит однажды разойтись с картой. -->
+        <h2 class="sec" style="margin-top:14px">Карта «Осада»</h2>
+        <div class="rows">
+          <div class="row"><span>Этаж 0 · земля</span><b>двор, лагерь, улочки посада</b></div>
+          <div class="row"><span>Этаж 1 · боевой ход</span><b><span id="mapF1">7.5</span> м — камень и настилы</b></div>
+          <div class="row"><span>Этаж 2 · верх</span><b><span id="mapF2">15</span> м — башни и мосты</b></div>
+          <div class="row"><span>Север</span><b style="color:#e08d8d">замок RED: двор, кольцевой ход</b></div>
+          <div class="row"><span>Юг</span><b style="color:#8fc0dd">лагерь BLU: помосты, башня</b></div>
+          <div class="row"><span>Центр</span><b>посад: руины, обелиск, мосты</b></div>
+          <div class="row"><span>Наверх и вниз</span><b class="arc">рампы, лестницы, тросы</b></div>
+        </div>
+
+        <h2 class="sec" style="margin-top:14px">Подвижность</h2>
+        <div class="rows">
+          <div class="row"><span>Подтягивание</span><b>уступ до 2 м берётся сам</b></div>
+          <div class="row"><span>Доп. прыжок</span><b class="arc">эфирный толчок в воздухе</b></div>
+          <div class="row"><span>Рывок <kbd>Q</kbd></span><b class="arc">шкала под дыханием</b></div>
+          <div class="row"><span>Сорваться с края</span><b>прыжок ещё засчитывается</b></div>
+        </div>
       </div>
     </div>
     <div class="foot">
-      <button class="btn" id="playBtn">ОДИНОЧНЫЙ БОЙ</button>
+      <!-- Подпись кнопки ведёт HUD: за какую сторону пойдёт бой, должно быть
+           видно ровно там, где по ней нажимают, а не только в карточках выше. -->
+      <button class="btn" id="playBtn">В БОЙ ЗА BLU</button>
       <!-- Подключение стоит рядом с «в бой» намеренно: это второй способ начать
            тот же матч, а не отдельный раздел настроек. Адрес подставляется тот,
            с которого открыта страница, — обычно вводить не нужно ничего. -->
@@ -186,6 +220,9 @@
       <div>
         <h2 class="sec">Бойцы в комнате</h2>
         <div id="netLobbyList" class="nlist"></div>
+        <!-- Команду выдаёт сервер, и об этом надо сказать прямо: игрок только
+             что выбирал сторону в брифинге и вправе не понять, почему он не там. -->
+        <div class="nbots" id="netLobbyTeam">ВАША СТОРОНА: <b>—</b></div>
         <div class="nbots" id="netLobbyBots">СВОБОДНЫЕ СЛОТЫ ЗАЙМУТ БОТЫ: <b>0</b></div>
         <div class="nfair">Попадания засчитывает стреляющий, сервер лишь проверяет заявки: игра рассчитана на бой с друзьями, а не на защиту от читеров. Ботов симулирует один клиент — он отмечен в списке.</div>
       </div>

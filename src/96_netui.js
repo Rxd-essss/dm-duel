@@ -55,6 +55,29 @@ function NUI_short(s){
 }
 function NUI_teamCls(t){ return (t|0) === 1 ? 'red' : 'blu'; }
 function NUI_teamName(t){ return (t|0) === 1 ? 'RED' : 'BLU'; }
+
+/* ------------------------------ КОМАНДА ------------------------------ */
+/* Сторону в сети назначает комната (NETCONTRACT §6): в hello пожелания нет, и
+   выдумывать его здесь нельзя — интерфейс обязан показывать, что решил сервер,
+   а не то, что игрок нажал в брифинге.
+
+   Раньше здесь стояло `n ? n.team|0 : 0` — то есть «без сети мы BLU». С выбором
+   стороны это стало враньём: офлайн игрок вполне может играть за RED. */
+function NUI_myTeam(){
+  const n = NUI_net();
+  if(NUI_on() && n) return (n.team|0) === 1 ? 1 : 0;
+  if(typeof playerTeam === 'function') return playerTeam();
+  return (game.team|0) === 1 ? 1 : 0;
+}
+/* Кладём команду сервера в game.team (единый источник правды для респавнов,
+   счёта и цвета HUD) и переводим выбор стороны в брифинге в режим подписи.
+   Отключились — замок снимаем, игрок снова выбирает сам. */
+function NUI_syncTeam(){
+  const t = NUI_on() ? NUI_myTeam() : -1;
+  if(typeof lockTeamChoice === 'function') lockTeamChoice(t);
+  else if(t >= 0) game.team = t;
+  return t;
+}
 function NUI_now(){
   return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
 }
@@ -112,7 +135,7 @@ function NUI_collect(){
   }
   if(!haveMe && me >= 0){
     const r = NUI_selfRow;
-    r.id = me; r.team = n.team|0;
+    r.id = me; r.team = NUI_myTeam();
     r.name = NUI_myName();
     // офлайновые счётчики матча — единственное, что есть про себя без сервера
     r.kills = game.kills|0; r.deaths = game.deaths|0;
@@ -175,6 +198,7 @@ function netUIPlayers(){
 
 function NUI_draw(){
   const n  = NUI_net();
+  NUI_syncTeam();                      // ростер мог принести смену команды
   const me = NUI_collect();
   const host = NUI_hostId(me);
   const bots = n ? (n.botCount|0) : 0;
@@ -196,7 +220,7 @@ function NUI_draw(){
   if(NUI_state === 'play'){
     if(blu !== NUI_bluShow){ NUI_bluShow = blu; const e = $('netScBlu'); if(e) e.textContent = blu; }
     if(red !== NUI_redShow){ NUI_redShow = red; const e = $('netScRed'); if(e) e.textContent = red; }
-    const mine = n ? (n.team|0) : 0;
+    const mine = NUI_myTeam();
     const tb = document.querySelector('#netTeams .nt.blu'), tr = document.querySelector('#netTeams .nt.red');
     if(tb) tb.classList.toggle('mine', mine !== 1);
     if(tr) tr.classList.toggle('mine', mine === 1);
@@ -226,6 +250,14 @@ function NUI_drawLobby(me, host, bots){
   }
   const bs = $('netLobbyBots');
   if(bs) bs.innerHTML = 'СВОБОДНЫЕ СЛОТЫ ЗАЙМУТ БОТЫ: <b>'+bots+'</b>';
+  // Игрок только что выбирал сторону в брифинге и вправе не понять, почему он
+  // оказался не там: говорим прямо, что команду выдала комната.
+  const mt = $('netLobbyTeam');
+  if(mt){
+    const t = NUI_myTeam();
+    mt.innerHTML = 'ВАША СТОРОНА: <span class="tside '+(t === 1 ? 'red' : 'blu')+'">'+
+                   NUI_teamName(t)+'</span> — НАЗНАЧИЛ СЕРВЕР';
+  }
 }
 
 function NUI_drawBoard(me, host, bots, blu, red){
@@ -340,6 +372,8 @@ function netUISetState(s){
   }
   if(st === 'off') NUI_gotErr = false;
   if(st === 'play') clearStatus('net');
+  // сторона: в комнате её держит сервер, вне комнаты возвращаем выбор игроку
+  NUI_syncTeam();
   if(st === 'lobby' || st === 'play') netUIPlayers();
 }
 
@@ -468,7 +502,9 @@ function netUIInit(){
   const leave = $('netLeaveBtn');
   if(leave) leave.onclick = NUI_leave;
   const start = $('netStartBtn');
-  if(start) start.onclick = ()=>{ netUISetState('play'); startGame(); };
+  // команду фиксируем ДО startGame(): по game.team выбираются точки респавна,
+  // и подняться в чужой базе из-за порядка вызовов было бы обидно
+  if(start) start.onclick = ()=>{ netUISetState('play'); NUI_syncTeam(); startGame(); };
 
   /* Табло на удержании Tab. Свой слушатель, а не хук в 90_game.js: там Tab
      уже гасится preventDefault, но состояние табло — наше дело.
