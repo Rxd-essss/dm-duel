@@ -234,7 +234,7 @@ function AI_altSpawns(SP){
     let bestD = 1e18, best = null;
     for(let i=0;i<POSTS.length;i++){
       const p = POSTS[i];
-      if(AI_postLevel(p) !== 0 || p.z*side < 0) continue;
+      if(AI_postLevel(p) !== 0 || p.z*side < 0 || AI_postBarred(i)) continue;
       let seen = false;
       for(let k=0;k<AI_spTried.length;k++) if(AI_spTried[k] === p){ seen = true; break; }
       if(seen) continue;
@@ -247,6 +247,117 @@ function AI_altSpawns(SP){
   }
   return AI_spAlt;
 }
+
+/* ================= БАРЬЕРЫ БАЗ И ДОСТИЖИМОСТЬ ПОЗИЦИЙ =================
+   Барьер базы (BARRIERS в 30_physics.js) держит ТОЛЬКО чужую команду и
+   ТОЛЬКО на перемещении. Для ИИ отсюда следуют две вещи, и обе обязательные.
+
+   Первая: боец обязан сам объявить свою сторону в e.team. Без этого поля
+   barrierBlocks() честно отвечает «не мой клиент», и отделение спокойно
+   заходит на чужую базу — ровно то, что заказчик просил закрыть.
+
+   Вторая: огневая позиция за чужим барьером физически недостижима, и отбор
+   обязан выбрасывать её ДО того, как боец потратит на неё марш, срок и своё
+   место в бою. Отличить «за барьером» от «перед барьером» одной коробкой
+   нельзя: барьер — это створ входа, а не объём базы. Зато это надёжно
+   различается двумя отрезками:
+     из СВОЕЙ базы в точку барьер пересекается, а из точки в ЧУЖУЮ базу — нет
+   значит точка лежит в кармане, который барьер и запирает. Для точки в поле
+   верно обратное: до чужой базы из неё без барьера не дойти, и она остаётся
+   в выборке. Ложных срабатываний на нейтральной карте такой критерий не даёт,
+   а именно они были бы дороже всего: выключенные позиции не возвращаются.
+
+   Считается один раз на матч: POSTS и BARRIERS после сборки карты не меняются,
+   а смена команды ботов пересобирает таблицу целиком. В кадре — чтение массива. */
+let AI_capBar = -1;
+function AI_barsOn(){
+  if(AI_capBar < 0)
+    AI_capBar = (typeof BARRIERS !== 'undefined' && BARRIERS && typeof barrierBlocks === 'function') ? 1 : 0;
+  return AI_capBar === 1 && BARRIERS.length > 0;
+}
+/* Чужой ли это барьер для команды ботов. Своя сторона проходит насквозь. */
+function AI_barFoe(b){ return (b.team|0) !== AI_TEAM; }
+
+/* Стоять в чужом барьере нельзя: физика вытолкнет. Проверка живая (барьеров
+   на карте единицы), её зовёт локальный обход, когда ищет, куда шагнуть. */
+function AI_barredAt(x, z, y){
+  if(!AI_barsOn()) return false;
+  for(let i=0;i<BARRIERS.length;i++){
+    const b = BARRIERS[i];
+    if(!AI_barFoe(b)) continue;
+    if(b.top <= y + 0.02 || b.bot >= y + CFG.height) continue;
+    const lx = b.lx(x, z), lz = b.lz(x, z);
+    if(Math.abs(lx) < b.hx + CFG.radius && Math.abs(lz) < b.hz + CFG.radius) return true;
+  }
+  return false;
+}
+
+/* Отрезок против OBB барьера. Свои слэбы, а не rayBoxes: барьеров нет в
+   BOXES, и это правильно — сквозь них летят пули. */
+const AI_slO = new Float64Array(3), AI_slD = new Float64Array(3), AI_slH = new Float64Array(3);
+function AI_segBar(b, x0, y0, z0, x1, y1, z1){
+  AI_slO[0] = b.lx(x0, z0); AI_slO[1] = y0 - b.c.y; AI_slO[2] = b.lz(x0, z0);
+  AI_slD[0] = b.lx(x1, z1) - AI_slO[0];
+  AI_slD[1] = y1 - b.c.y   - AI_slO[1];
+  AI_slD[2] = b.lz(x1, z1) - AI_slO[2];
+  AI_slH[0] = b.hx + CFG.radius; AI_slH[1] = b.hy; AI_slH[2] = b.hz + CFG.radius;
+  let t0 = 0, t1 = 1;
+  for(let a=0;a<3;a++){
+    const o = AI_slO[a], d = AI_slD[a], h = AI_slH[a];
+    if(Math.abs(d) < 1e-9){ if(Math.abs(o) > h) return false; continue; }
+    const inv = 1/d;
+    let ta = (-h - o)*inv, tb = (h - o)*inv;
+    if(ta > tb){ const q = ta; ta = tb; tb = q; }
+    if(ta > t0) t0 = ta;
+    if(tb < t1) t1 = tb;
+    if(t0 > t1) return false;
+  }
+  return true;
+}
+/* Пересекает ли отрезок хоть один ЧУЖОЙ барьер. */
+function AI_segBarred(x0, y0, z0, x1, y1, z1){
+  for(let i=0;i<BARRIERS.length;i++){
+    const b = BARRIERS[i];
+    if(!AI_barFoe(b)) continue;
+    if(AI_segBar(b, x0, y0, z0, x1, y1, z1)) return true;
+  }
+  return false;
+}
+
+/* Середина базы стороны t. Список точек появления — единственное, что на
+   карте гарантированно принадлежит команде; пустой список не повод падать. */
+const AI_baseC = { x:0, y:0, z:0 };
+function AI_baseOf(t){
+  const SP = (t === 1) ? (typeof SPAWNS_RED !== 'undefined' ? SPAWNS_RED : null)
+                       : (typeof SPAWNS_BLU !== 'undefined' ? SPAWNS_BLU : null);
+  if(SP && SP.length){
+    let x = 0, y = 0, z = 0;
+    for(let i=0;i<SP.length;i++){ x += SP[i].x; z += SP[i].z; y += (SP[i].y === undefined) ? gh(SP[i].x, SP[i].z) : SP[i].y; }
+    AI_baseC.x = x/SP.length; AI_baseC.z = z/SP.length; AI_baseC.y = y/SP.length;
+  } else {
+    AI_baseC.x = 0; AI_baseC.z = (t === 1) ? 60 : -60; AI_baseC.y = gh(AI_baseC.x, AI_baseC.z);
+  }
+  return AI_baseC;
+}
+
+const AI_bbV = [];                 // вердикт по POSTS[i]: за чужим барьером или нет
+let AI_bbTeam = -1, AI_bbN = -1;
+function AI_barTable(){
+  if(!AI_barsOn()){ AI_bbV.length = 0; return false; }
+  if(AI_bbTeam === AI_TEAM && AI_bbN === BARRIERS.length && AI_bbV.length === POSTS.length) return true;
+  AI_bbTeam = AI_TEAM; AI_bbN = BARRIERS.length; AI_bbV.length = POSTS.length;
+  const me = AI_baseOf(AI_TEAM);
+  const mx = me.x, my = me.y + 1.0, mz = me.z;
+  const fo = AI_baseOf(AI_TEAM ^ 1);
+  const fx = fo.x, fy = fo.y + 1.0, fz = fo.z;
+  for(let i=0;i<POSTS.length;i++){
+    const p = POSTS[i], py = AI_postY(p) + 1.0;
+    AI_bbV[i] = AI_barredAt(p.x, p.z, AI_postY(p)) ||
+                (AI_segBarred(mx, my, mz, p.x, py, p.z) && !AI_segBarred(p.x, py, p.z, fx, fy, fz));
+  }
+  return true;
+}
+function AI_postBarred(i){ return AI_barTable() ? AI_bbV[i] === true : false; }
 
 /* =============== ОБЩАЯ ПАМЯТЬ О НЕДОСТИЖИМЫХ ПОЗИЦИЯХ ===============
    Личный чёрный список бойца не спасает от системной беды: если на позицию
@@ -629,6 +740,257 @@ function AI_updShots(dt){
   }
 }
 
+/* ========================= ЧЕМ ВООРУЖЕНО ОТДЕЛЕНИЕ =========================
+   Замечание заказчика «враги не используют лук» нельзя закрыть тем, что лук
+   выдан всем: тогда исчезнет винтовка, и вместо одной однобокой перестрелки
+   получится другая. Состав отделения решается тремя соображениями.
+
+   1. Обе школы обязаны быть на карте ОДНОВРЕМЕННО и различимо. Пока в бою
+      есть и стрелок, и лучник, игрок читает разницу сам: у одного плоский луч
+      и мгновенная пуля, у другого натянутая тетива и стрела, которую видно
+      в воздухе. Поэтому при двух и более бойцах хотя бы один — лучник и хотя
+      бы один — стрелок, чем бы ни играл сам игрок.
+   2. Игрок с луком обязан встретить лучников. Это прямая просьба заказчика и
+      заодно единственная честная школа игры: понять, как уводить стрелу и
+      как от неё уходить, можно только против того, кто делает это с тобой.
+   3. Сложность двигает долю, а не мастерство лука. Новобранец-лучник мажет
+      заметнее стрелка: у стрелы почти секунда полёта, и его промах виден
+      целиком, поэтому на «новобранце» лучников меньше, на «легенде» больше.
+
+   Итог: доля = 0.30, +0.25 если игрок с луком, ±0.10/0.15 от сложности.
+   easy 0.20/0.45, normal 0.30/0.55, hard 0.45/0.70 — и всегда обе школы. */
+let AI_ldN = -1, AI_ldW = -1, AI_ldK = 0, AI_ldRot = 0;
+
+/* Чем играет игрок. Источник правды тот же, что у оружейного модуля, — сам
+   боекомплект: game.weapon это лишь выбор в брифинге, и между матчами он уже
+   мог смениться, пока в стволе ещё прежний боеприпас. */
+function AI_playerBow(){
+  if(typeof AMMO !== 'undefined' && AMMO.length && AMMO[0]) return AMMO[0].arrow === true;
+  return (typeof game !== 'undefined' && game && (game.weapon|0) === 1);
+}
+function AI_archerShare(){
+  let s = 0.30;
+  if(AI_playerBow()) s += 0.25;
+  const dif = (typeof game !== 'undefined' && game) ? game.diff : 'normal';
+  if(dif === 'easy') s -= 0.10; else if(dif === 'hard') s += 0.15;
+  return clamp(s, 0, 1);
+}
+/* Кто именно берёт лук. Раздача детерминированная по номеру бойца: класс не
+   должен меняться при каждом возрождении, иначе игрок не успевает запомнить,
+   кто на карте лучник, и вся затея с читаемой разницей пропадает. Поворот
+   AI_ldRot перебирается только при пересборке состава — чтобы лучниками не
+   оказывались всегда одни и те же номера. */
+function AI_ldBow(id){
+  const n = AI_ldN > 0 ? AI_ldN : 1;
+  return ((((id|0) + AI_ldRot) % n) + n) % n < AI_ldK;
+}
+function AI_syncLoadout(force){
+  const n = enemies.length;
+  if(!n) return;
+  const w = AI_playerBow() ? 1 : 0;
+  if(!force && n === AI_ldN && w === AI_ldW) return;
+  AI_ldN = n; AI_ldW = w;
+  let k = Math.round(n*AI_archerShare());
+  if(n >= 2) k = clamp(k, 1, n - 1);       // обе школы обязаны быть видны
+  else k = (Math.random() < AI_archerShare()) ? 1 : 0;
+  AI_ldK = k;
+  AI_ldRot = (Math.random()*n)|0;
+  for(let i=0;i<n;i++){
+    const e = enemies[i];
+    if(e) e.setClass(AI_ldBow(e.id === undefined ? i : e.id));
+  }
+}
+/* Публичное чтение состава: сколько сейчас лучников. Нужно приёмке и брифингу,
+   и это единственный способ доказать замечание «враги не используют лук»
+   числом, а не на глаз. */
+function aiArchers(){
+  let n = 0;
+  for(let i=0;i<enemies.length;i++) if(enemies[i] && enemies[i].bow) n++;
+  return n;
+}
+
+/* ====================== ЛУК В РУКАХ БОТА: СНАРЯЖЕНИЕ ======================
+   Бот стреляет ОБЫЧНОЙ стрелой — ровно как из винтовки он стреляет только
+   матчевым: взрывные и огненные это выбор игрока, а не право отделения
+   закидать ярус площадным уроном.
+
+   Дескриптор постоянный и общий на все выстрелы: поля стрелы не зависят от
+   натяга (бот всегда тянет до упора), и держать его константой честнее, чем
+   лепить литерал на каждый выстрел. Мутировать его нельзя — пуля хранит на
+   себе ссылку и живёт до шести секунд. */
+const AI_ARROW = {
+  id: BOW_AMMO[0].id, arrow: true,
+  v: BOW_AMMO[0].v, drag: BOW_AMMO[0].drag, gMul: BOW_AMMO[0].gMul, windMul: BOW_AMMO[0].windMul,
+  col: BOW_AMMO[0].col, trail: BOW_AMMO[0].trail
+};
+/* Сколько бот достаёт из колчана и накладывает новую стрелу. У игрока это
+   0.42 с (BOW_AMMO[0].bolt), но игрок при этом стоит и держит кнопку. Бот
+   после выстрела уходит с точки, и цикл «натяг + наложение» с этим числом
+   встаёт вровень с винтовочным (≈2.6 с): класс обязан отличаться характером,
+   а не скорострельностью. */
+const AI_NOCK = 1.05;
+/* Урон стрелы бота. У винтовочника 38: стрела бьёт чуть сильнее, потому что
+   летит втрое медленнее и её видно в воздухе — за силу платят временем. */
+const AI_ARROW_DMG = 40;
+/* Пуля рождается на 0.5 м впереди точки схода (spawnBullet в 60_weapon.js).
+   Полметра на дуге — это пять сантиметров просадки на сотне; учитываем. */
+const AI_MUZZLE_OFF = 0.5;
+/* Круче этого бот не бьёт: зал перекрыт ярусами и стропилами, и навесная
+   свеча уходит в перекрытие, а не в цель. sin(25°). */
+const AI_ARC_MAXUP = 0.42;
+/* Натяг берём из паспорта оружия (10_core.js), но с запасным значением:
+   модуль обязан собираться и с оружейной таблицей другой ревизии. */
+const AI_DRAW_TIME = (WPNS[1] && WPNS[1].drawTime > 0) ? WPNS[1].drawTime : 1.05;
+const AI_DRAW_TRUE = (WPNS[1] && WPNS[1].drawTrue > 0) ? WPNS[1].drawTrue : 0.97;
+const AI_D2R = Math.PI/180;
+/* Угловая ошибка лучника относительно винтовочной. Задача у него тяжелее
+   (возвышение, ветер, упреждение на почти секунду полёта), и с одинаковой
+   ошибкой лучник получился бы заметно безобиднее стрелка — то есть замечание
+   «враги не используют лук» вернулось бы в виде «лучники не опасны». */
+const AI_BOW_ERR = 0.85;
+
+/* ==================== ДУГА СТРЕЛЫ: НАЧАЛО ====================
+   Это ровно та же задача, что у стрелка, но её нельзя решать формулой пули:
+   на 100 м стрела просаживается на 5.24 м против 0.53 м у матчевой, и бот,
+   который целится «в центр силуэта», кладёт стрелу под ноги.
+
+   Считаем не приближённо, а по той же модели, которую интегрирует
+   updateBullets(): dv/dt = -k·v + a, где a = (ветер, -g, ветер). У линейного
+   сопротивления решение точное:
+       v(t) = (v0 - a/k)·e^(-kt) + a/k
+       Δ(t) = v0·E + (a/k)·(t - E),  E = (1 - e^(-kt))/k
+   Отсюда при ИЗВЕСТНОМ времени полёта t скорость схода находится в лоб:
+       v0 = (Δ - (a/k)(t - E)) / E
+   и остаётся один скаляр — подобрать t так, чтобы |v0| совпало со скоростью
+   стрелы. Функция |v0|(t) на нужной ветви монотонно убывает, поэтому t берём
+   делением отрезка: 22 шага дают время полёта с точностью до микросекунды.
+
+   Почему не «честная итерация угла»: угол и время связаны, и итерация по
+   углу требует прогонять траекторию целиком на каждой пробе. Здесь один
+   Math.exp на пробу и ни одной аллокации — при том же результате.
+
+   Шаг интегратора у пули h ≤ 0.005 с, и разница дискретной схемы с
+   непрерывной моделью на сотне метров — около трёх сантиметров: меньше
+   ширины наконечника. Замер этой ошибки — в отчёте.
+
+   ВАЖНО: блок целиком читается автопроверкой как текст между этими двумя
+   метками. Не переименовывать метки и не заводить внутри блока ссылок на
+   игровые объекты — только скаляры. */
+const AI_ARC = { ok:false, t:0, ux:0, uy:0, uz:0, px:0, py:0, pz:0 };
+let AI_arcVX = 0, AI_arcVY = 0, AI_arcVZ = 0;
+
+/* Какая скорость схода нужна, чтобы прийти в цель ровно за t. */
+function AI_arcNeed(dx, dy, dz, t, k, g, wx, wz){
+  let E, c;
+  if(k > 1e-6){ const e = Math.exp(-k*t); E = (1 - e)/k; c = (t - E)/k; }
+  else { E = t; c = t*t*0.5; }
+  if(E < 1e-9) E = 1e-9;
+  AI_arcVX = (dx - wx*c)/E;
+  AI_arcVY = (dy + g*c)/E;
+  AI_arcVZ = (dz - wz*c)/E;
+  return Math.sqrt(AI_arcVX*AI_arcVX + AI_arcVY*AI_arcVY + AI_arcVZ*AI_arcVZ);
+}
+/* Единичное направление схода и время полёта. false — цель вне досягаемости
+   (или вырожденный ввод): тогда направление отдаём прямое, чтобы вызывающему
+   было чем целиться, но стрелять по такому решению он не обязан. */
+function AI_arcSolve(mx, my, mz, tx, ty, tz, v0, k, g, wx, wz){
+  const dx = tx - mx, dy = ty - my, dz = tz - mz;
+  const L = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  AI_ARC.t = 0;
+  if(!(v0 > 1) || !(L > 1e-4)){
+    const l = L > 1e-6 ? L : 1;
+    AI_ARC.ux = dx/l; AI_ARC.uy = dy/l; AI_ARC.uz = dz/l;
+    AI_ARC.ok = false; return false;
+  }
+  /* Нижняя граница: время, за которое стрела прошла бы прямую на полной
+     скорости. Обычно этого мало (сопротивление тормозит), но выстрел вниз
+     гравитация РАЗГОНЯЕТ, и там корень лежит раньше — опускаем границу,
+     пока требуемая скорость не станет заведомо больше нашей. */
+  let lo = L/(v0*3);
+  if(!(lo > 1e-4)) lo = 1e-4;
+  for(let i=0;i<16 && AI_arcNeed(dx,dy,dz,lo,k,g,wx,wz) <= v0; i++) lo *= 0.5;
+  let hi = lo, found = false;
+  for(let i=0;i<16;i++){
+    hi *= 1.4;
+    if(hi > 12) break;
+    if(AI_arcNeed(dx,dy,dz,hi,k,g,wx,wz) <= v0){ found = true; break; }
+    lo = hi;
+  }
+  if(!found){
+    const l = L;
+    AI_ARC.ux = dx/l; AI_ARC.uy = dy/l; AI_ARC.uz = dz/l;
+    AI_ARC.ok = false; return false;
+  }
+  for(let i=0;i<22;i++){
+    const m = (lo + hi)*0.5;
+    if(AI_arcNeed(dx,dy,dz,m,k,g,wx,wz) > v0) lo = m; else hi = m;
+  }
+  const need = AI_arcNeed(dx,dy,dz,hi,k,g,wx,wz);
+  const inv = 1/(need > 1e-6 ? need : 1);
+  AI_ARC.ux = AI_arcVX*inv; AI_ARC.uy = AI_arcVY*inv; AI_ARC.uz = AI_arcVZ*inv;
+  AI_ARC.t = hi; AI_ARC.ok = true;
+  return true;
+}
+
+/* Полное решение выстрела из лука в скалярах: упреждение, поправка на точку
+   схода и угловая ошибка наводчика. Ошибку кладём ПОВОРОТОМ НАПРАВЛЕНИЯ, а
+   не сдвигом цели: сдвинуть точку прицеливания на дуге значит пересчитать и
+   возвышение, то есть промахнуться «правильно», чего у живого лучника не
+   бывает. errAng — куда именно уводит, errRad — на сколько. */
+function AI_bowAim(mx, my, mz, tx, ty, tz, tvx, tvy, tvz,
+                   v0, k, g, wx, wz, lead, errRad, errAng){
+  if(!AI_arcSolve(mx, my, mz, tx, ty, tz, v0, k, g, wx, wz)){
+    AI_ARC.px = tx; AI_ARC.py = ty; AI_ARC.pz = tz;
+    return false;
+  }
+  const t1 = AI_ARC.t, l1 = t1*lead;
+  const px = tx + tvx*l1, py = ty + tvy*l1, pz = tz + tvz*l1;
+  const sx = mx + AI_ARC.ux*AI_MUZZLE_OFF,
+        sy = my + AI_ARC.uy*AI_MUZZLE_OFF,
+        sz = mz + AI_ARC.uz*AI_MUZZLE_OFF;
+  const ok = AI_arcSolve(sx, sy, sz, px, py, pz, v0, k, g, wx, wz);
+  AI_ARC.px = px; AI_ARC.py = py; AI_ARC.pz = pz;
+  if(!ok) return false;
+  if(errRad > 1e-6){
+    const ux = AI_ARC.ux, uy = AI_ARC.uy, uz = AI_ARC.uz;
+    // правый вектор = u × вверх; у вертикального выстрела берём запасную ось
+    let rx = -uz, ry = 0, rz = ux;
+    let rl = Math.sqrt(rx*rx + rz*rz);
+    if(rl < 1e-4){ rx = 1; ry = 0; rz = 0; rl = 1; }
+    rx /= rl; rz /= rl;
+    // верхний вектор = правый × u (оба единичные и ортогональные)
+    const kx = ry*uz - rz*uy, ky = rz*ux - rx*uz, kz = rx*uy - ry*ux;
+    const e = Math.tan(errRad), c = Math.cos(errAng)*e, s = Math.sin(errAng)*e*0.7;
+    let nx = ux + rx*c + kx*s, ny = uy + ky*s, nz = uz + rz*c + kz*s;
+    const nl = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+    AI_ARC.ux = nx/nl; AI_ARC.uy = ny/nl; AI_ARC.uz = nz/nl;
+  }
+  return true;
+}
+/* Угловая ошибка лучника, градусы. Шкала винтовочная (дистанция, скорость
+   цели, дрожь, собственный бег), множитель AI_BOW_ERR — цена сложности
+   задачи. Вынесено функцией, потому что этим же числом её меряет автопроверка. */
+function AI_bowErrDeg(dist, tgtSpeed, flinch, settle, selfSp){
+  return D.err*(0.55 + dist/95)*(1 + Math.min(1.1, tgtSpeed*0.075))*flinch*
+         (1 + settle*0.9 + selfSp)*AI_BOW_ERR;
+}
+/* ==================== ДУГА СТРЕЛЫ: КОНЕЦ ==================== */
+
+/* Модель бойца умеет показывать оба ствола и держать натяг (50_models.js:
+   userData.showWeapon / userData.bowDraw). Сборка со старой моделью не должна
+   падать — возможности проверяем один раз и дальше работаем по флагу. */
+let AI_capShow = -1, AI_capDraw = -1;
+function AI_showWeapon(m, bow){
+  if(!m || !m.userData) return;
+  if(AI_capShow < 0) AI_capShow = (typeof m.userData.showWeapon === 'function') ? 1 : 0;
+  if(AI_capShow) m.userData.showWeapon(bow ? 1 : 0);
+}
+function AI_bowDraw(m, t){
+  if(!m || !m.userData) return;
+  if(AI_capDraw < 0) AI_capDraw = (typeof m.userData.bowDraw === 'function') ? 1 : 0;
+  if(AI_capDraw) m.userData.bowDraw(t);
+}
+
 /* ============================== ОТДЕЛЕНИЕ ==============================
    Тик раз в ~0.4 с: раздать роли, решить, окружаем мы игрока или нет,
    и развести бойцов по пеленгам. Каждый кадр здесь делать нечего —
@@ -695,6 +1057,11 @@ const SQUAD = {
     this._acc += dt;
     if(this._acc < 0.4) return;
     const st = this._acc; this._acc = 0;
+
+    /* Состав отделения по стволам. Здесь, а не в кадре: пересчёт нужен только
+       когда сменился ростер (сеть добавила бота) или оружие игрока, а сравнение
+       двух чисел на тике в 0.4 с не стоит ничего. */
+    AI_syncLoadout(false);
 
     AI_live.length = 0;
     for(let i=0;i<enemies.length;i++) if(enemies[i].alive) AI_live.push(enemies[i]);
@@ -791,9 +1158,27 @@ class Enemy {
     // какой команде собрана модель: по этой метке retint() решает, надо ли её
     // пересобирать при смене стороны между матчами.
     this.mTeam = AI_TEAM;
+    /* Сторона бойца ДЛЯ ФИЗИКИ. Барьер базы держит того, у кого team чужой, и
+       узнаёт он это только по этому полю (30_physics.js §БАРЬЕРЫ). Без него
+       отделение заходит на чужую базу как к себе домой. Ставим первым делом:
+       ниже по конструктору уже идёт respawn(), а он двигает бойца. */
+    this.team = AI_TEAM;
     this.m = mkSniper(AI_pal(), AI_palDk());
     scene.add(this.m);
     this.bindModel();
+
+    /* Ствол бойца. bow — единственный переключатель: от него зависят решение
+       выстрела, телеграф, поза и модель в руках. Боеприпас держим ссылкой,
+       чтобы нигде не читать AMMO[0]: это пояс ИГРОКА, и он подменяется на
+       месте при выборе оружия в брифинге — стрелок с луком игрока в руках
+       стрелял бы стрелой по винтовочной формуле. */
+    this.bow = false;
+    this.am = RIFLE_AMMO[0];
+    this.clsShown = null;              // на какой модели класс уже показан
+    this.drawT = 0; this.drawFull = 1; this.arcOK = true;
+    // Куда, по мнению бота, придёт стрела: у дуги это НЕ точка прицеливания,
+    // и телеграф обязан показывать игроку именно её.
+    this.markPt = V(0,0,0);
 
     // тело и физика (контракт сущности из §3.3)
     this.pos = V(0,0,0); this.vel = V(0,0,0);
@@ -879,6 +1264,21 @@ class Enemy {
     this.boltZ = bolt ? bolt.position.z : 0;
   }
 
+  /* Выдать бойцу ствол. Зовётся раздачей состава (AI_syncLoadout) и при
+     возрождении; структуру userData не трогает — только просит модель
+     показать нужное оружие и сбрасывает натяг. Идемпотентна: повторный вызов
+     с тем же классом ничего не делает, поэтому её не жалко звать часто. */
+  setClass(bow){
+    const b = !!bow;
+    if(b === this.bow && this.clsShown === this.m) return;
+    this.bow = b;
+    this.am = b ? AI_ARROW : RIFLE_AMMO[0];
+    this.drawT = 0; this.arcOK = true;
+    this.clsShown = this.m;
+    AI_showWeapon(this.m, b);
+    AI_bowDraw(this.m, 0);
+  }
+
   /* Перекраска под текущую команду. Менять цвет материалам нельзя: они лежат
      в общем кэше 50_models.js, один объект на всю сборку, и красный жилет
      бойца — это тот же материал, что и красный жилет где угодно ещё. Поэтому
@@ -886,6 +1286,10 @@ class Enemy {
      кэширована по команде, так что второй комплект стоит пары мешей и живёт
      до конца сессии. Зовётся из aiSetTeam() между матчами. */
   retint(){
+    // Сторона для физики обновляется ВСЕГДА, даже когда модель пересобирать
+    // не надо: барьер базы читает именно её, и «перекрасили, но ходит везде»
+    // было бы худшим из возможных исходов.
+    this.team = AI_TEAM;
     if(this.mTeam === AI_TEAM) return;
     if(this.fireFx){
       const ch = this.fireFx.children;
@@ -907,6 +1311,10 @@ class Enemy {
     U.hat.visible = true;
     U.hat.position.set(0, 0.34, 0);
     U.hat.rotation.set(0, 0, 0);
+    // Новая модель приходит с винтовкой в руках: класс бойца от смены цвета
+    // не меняется, поэтому оружие показываем заново. setClass узнаёт чужую
+    // модель по clsShown и не считает вызов лишним.
+    this.setClass(this.bow);
     this.poseRest();
   }
 
@@ -1106,6 +1514,9 @@ class Enemy {
       const p = POSTS[i];
       if(p.taken && p.taken !== this) continue;
       if(this.isAvoided(p) || AI_postDead(p)) continue;
+      // За чужим барьером точки нет: туда не ведёт ни один проход, и марш к
+      // ней — это выброшенный срок и выбывший из боя боец.
+      if(AI_postBarred(i)) continue;
       const dPl = Math.hypot(p.x - tx, p.z - tz);
       const dMe = Math.hypot(p.x - this.pos.x, p.z - this.pos.z);
       const lvl = AI_postLevel(p);
@@ -1208,15 +1619,40 @@ class Enemy {
     this.go('move');
   }
 
+  /* Сколько бот выцеливает перед выстрелом. У лучника выдержку снизу держит
+     ХОД ТЕТИВЫ: недотянутый лук бьёт медленно и вразброс, поэтому «выстрелить
+     раньше» для него не выбор, а промах. Он же и есть телеграф — тетива
+     натягивается на глазах у игрока целую секунду, на любой сложности. */
+  startCharge(){
+    this.charge = 0; this.solveT = 0; this.drawT = 0;
+    let c = rnd(D.charge[0], D.charge[1]);
+    if(this.bow){
+      const need = AI_DRAW_TIME*1.05;
+      if(c < need) c = need;
+      // полный натяг набирается заметно раньше спуска: бот не «дотягивает в
+      // момент выстрела», а стоит с натянутым луком — это видно и издалека
+      this.drawFull = c*0.92;
+      this.creak();
+    }
+    this.chargeNeed = c;
+  }
+  /* Скрип тетивы — звуковая половина телеграфа. Лучника слышно даже тогда,
+     когда его силуэт ещё не разобрал, — ровно та же подсказка, что блик
+     оптики у стрелка. Один звук на цикл прицеливания, не в кадре. */
+  creak(){
+    if(typeof volOf !== 'function') return;
+    if(this.pos.distanceTo(camera.position) > 95) return;
+    SFX.noise({dur:0.42, f:240, f2:520, q:1.1, g:0.11*volOf(this.pos), pan:panOf(this.pos)});
+  }
+
   /* ------------------------------ переходы ------------------------------ */
   go(s){
     this.state = s; this.stateT = 0;
     if(s === 'aim'){
-      this.charge = 0; this.solveT = 0;
       // Живая цель отменяет остаток подавляющей серии: иначе счётчик серии
       // никогда не обнуляется и бот навсегда залипает в цикле «прицел—выстрел».
       this.supN = 0;
-      this.chargeNeed = rnd(D.charge[0], D.charge[1]);
+      this.startCharge();
       // Сколько терпим, если чистый выстрел так и не складывается: цель,
       // которая мелькает в укрытии, не должна намертво приковывать бота.
       // На полпути к позиции терпение короче: стоять столбом посреди поля
@@ -1225,8 +1661,7 @@ class Enemy {
       this.aimSolution();
     } else if(s === 'suppress'){
       if(this.supN <= 0) this.supN = rint(2,3);
-      this.charge = 0; this.solveT = 0;
-      this.chargeNeed = rnd(D.charge[0], D.charge[1]);
+      this.startCharge();
       this.rollSup(); this.supSolution();
     } else if(s === 'settle'){
       this.settleNeed = rnd(0.45, 1.15);
@@ -1532,8 +1967,8 @@ class Enemy {
         if(this.solveT <= 0){ this.solveT = 0.28; this.aimSolution(); }
         const aimed = Math.abs(angDiff(this.yaw, this.aimYaw)) < 0.055 &&
                       Math.abs(this.pitch - this.aimPitch) < 0.09;
-        // laserT — гарантия, что луч успел побыть на экране: без него выстрел нечестен
-        if(this.charge > this.chargeNeed && aimed && this.laserT > 0.34){ this.shoot(); break; }
+        // laserT — гарантия, что телеграф успел побыть на экране: без него выстрел нечестен
+        if(this.charge > this.chargeNeed && aimed && this.canLoose(0.34)){ this.shoot(); break; }
         if(this.loseT > 0.9){
           if(this.resume()) break;
           if(this.kAge < 4 && this.supCd <= 0 && Math.random() < D.sup) this.go('suppress');
@@ -1565,7 +2000,9 @@ class Enemy {
         this.solveT -= dt;
         if(this.solveT <= 0){ this.solveT = 0.32; this.supSolution(); }
         const aimed = Math.abs(angDiff(this.yaw, this.aimYaw)) < 0.09;
-        if(this.charge > this.chargeNeed*0.75 && aimed && this.laserT > 0.30){
+        // Лучник и подавляет полным натягом: недотянутая стрела не долетит до
+        // края укрытия, а значит и подавлять ей нечего.
+        if(this.charge > this.chargeNeed*(this.bow ? 1 : 0.75) && aimed && this.canLoose(0.30)){
           this.shoot();
           this.supN--;
           if(this.supN <= 0) this.supCd = rnd(4.5, 9);
@@ -1643,6 +2080,9 @@ class Enemy {
       const s = -Math.hypot(mv.x - tx, mv.z - tz);
       if(s <= bs) continue;                      // хуже уже найденной — и проверять нечего
       if(!AI_walkAt(tx, tz, y)) continue;
+      // В чужой барьер обход не ведём: физика вытолкнет, и боец будет считать
+      // это затыком снова и снова.
+      if(AI_barredAt(tx, tz, y)) continue;
       let ok = true;
       for(let t=0.35; t<0.99 && ok; t+=0.32)
         if(!AI_walkAt(this.pos.x + dx*R*t, this.pos.z + dz*R*t, y)) ok = false;
@@ -1848,22 +2288,44 @@ class Enemy {
     U.armL.A.position.y = aY + R.armLY;
     U.armR.A.position.y = aY + R.armRY;
 
-    // Винтовка: на изготовку при прицеливании, у бедра — на бегу.
-    U.rifle.position.set(R.rifleX - carry*0.05, aY + R.rifleY - carry*0.15, R.rifleZ + carry*0.10);
-    U.rifle.rotation.set(R.rifRx + rp*ab - carry*0.42 - this.recoil*0.30, yerr*ab, carry*0.30);
-
     const swing = sw*0.32*gait*carry;
-    U.armR.A.rotation.set(R.aRx + carry*0.55 + swing + rp*0.6*ab, R.aRy + yerr*0.30*ab, R.aRz);
-    U.armL.A.rotation.set(R.aLx + carry*0.72 - swing + rp*0.6*ab, R.aLy + yerr*0.30*ab, R.aLz);
-    U.armR.E.rotation.x = R.eRx - carry*0.35;
-    U.armL.E.rotation.x = R.eLx - carry*0.25;
+    if(this.bow){
+      /* ЛУК В РУКАХ, а не «висит перед бойцом». Держатель (в нём живёт модель
+         лука) идёт к лицу по мере натяга, левая рука уходит вперёд на рукоять
+         и распрямляется в локте, правая тянет тетиву к скуле — локоть
+         складывается ровно на величину натяга. Именно эта пара «прямая рука
+         вперёд + сложенный локоть назад» и читается силуэтом как лучник. */
+      const dr = this.drawT;
+      U.rifle.position.set(R.rifleX + ab*0.05, aY + R.rifleY - carry*0.15 + ab*0.05, R.rifleZ + carry*0.10);
+      U.rifle.rotation.set(R.rifRx + rp*ab - carry*0.42 - this.recoil*0.10, yerr*ab, carry*0.30 - ab*0.12);
+      U.armL.A.rotation.set(R.aLx - ab*0.28 + carry*0.72 - swing + rp*0.6*ab,
+                            R.aLy + yerr*0.30*ab - ab*0.12, R.aLz);
+      U.armR.A.rotation.set(R.aRx + carry*0.55 + swing + rp*0.6*ab + ab*dr*0.24,
+                            R.aRy + yerr*0.30*ab - ab*dr*0.34, R.aRz + ab*dr*0.22);
+      U.armL.E.rotation.x = R.eLx - carry*0.25 + ab*0.22;
+      U.armR.E.rotation.x = R.eRx - carry*0.35 - ab*dr*1.05;
+      // Разворот корпуса — вторая половина телеграфа: лучник встаёт боком и
+      // чуть отклоняется назад, и это видно даже там, где метка не читается.
+      U.torso.rotation.y = yerr*0.7 - ab*dr*0.26;
+      U.torso.rotation.x -= ab*dr*0.07;
+      // Тетива. Единственное место, где натяг превращается в геометрию.
+      AI_bowDraw(this.m, this.aiming ? dr : 0);
+    } else {
+      // Винтовка: на изготовку при прицеливании, у бедра — на бегу.
+      U.rifle.position.set(R.rifleX - carry*0.05, aY + R.rifleY - carry*0.15, R.rifleZ + carry*0.10);
+      U.rifle.rotation.set(R.rifRx + rp*ab - carry*0.42 - this.recoil*0.30, yerr*ab, carry*0.30);
+      U.armR.A.rotation.set(R.aRx + carry*0.55 + swing + rp*0.6*ab, R.aRy + yerr*0.30*ab, R.aRz);
+      U.armL.A.rotation.set(R.aLx + carry*0.72 - swing + rp*0.6*ab, R.aLy + yerr*0.30*ab, R.aLz);
+      U.armR.E.rotation.x = R.eRx - carry*0.35;
+      U.armL.E.rotation.x = R.eLx - carry*0.25;
 
-    // затвор передёргивается ровно тогда, когда бот перезаряжается
-    const bolt = U.rifle.userData ? U.rifle.userData.bolt : null;
-    if(bolt){
-      const total = AMMO[0].bolt;
-      const k = (this.state === 'shot') ? clamp(1 - this.reload/Math.max(0.01, total), 0, 1) : 0;
-      bolt.position.z = this.boltZ + Math.sin(k*Math.PI)*0.16;
+      // затвор передёргивается ровно тогда, когда бот перезаряжается
+      const bolt = U.rifle.userData ? U.rifle.userData.bolt : null;
+      if(bolt){
+        const total = this.am.bolt;
+        const k = (this.state === 'shot') ? clamp(1 - this.reload/Math.max(0.01, total), 0, 1) : 0;
+        bolt.position.z = this.boltZ + Math.sin(k*Math.PI)*0.16;
+      }
     }
 
     // огонь на бойце жмётся к телу, а не висит в воздухе
@@ -1891,9 +2353,10 @@ class Enemy {
     U.armR.A.rotation.set(-2.55 - s*0.55, 0, R.aRz*0.4);
     U.armL.E.rotation.x = -0.45;
     U.armR.E.rotation.x = -0.45;
-    // винтовка уходит за спину — обе руки заняты
+    // оружие уходит за спину — обе руки заняты; лук при этом ослаблен
     U.rifle.position.set(R.rifleX, aY + R.rifleY - 0.18, R.rifleZ + 0.34);
     U.rifle.rotation.set(0.5, 0, 1.25);
+    if(this.bow) AI_bowDraw(this.m, 0);
     if(this.fireFx) this.fireFx.position.y = 0;
   }
 
@@ -1903,6 +2366,31 @@ class Enemy {
   telegraph(dt){
     const U = this.m.userData;
     const show = (this.state === 'aim' && this.los) || this.state === 'suppress';
+    /* ТЕЛЕГРАФ ЛУЧНИКА. Лазера у лука нет и быть не может — это прицельный
+       луч оптики, и на луке он читался бы как чужая деталь. Взамен работают
+       три вещи, и все три видны с любой дистанции:
+         · натянутая тетива и разворот корпуса (animate) — целую секунду;
+         · руна на рукояти разгорается по мере натяга — это «блик оптики»
+           лука, но без условия «оптика смотрит на камеру»: руна светит
+           во все стороны, поэтому лучника видно и в профиль;
+         · метка в точке ПАДЕНИЯ стрелы, а не на линии взгляда. У навесного
+           выстрела это разные точки, и игроку нужна вторая: она говорит
+           «уйди отсюда», а не «на тебя смотрят».
+       Стрела летит почти секунду на сотне метров — уйти успевает и тот, кто
+       среагировал только на саму стрелу. */
+    if(this.bow){
+      U.laser.visible = false;
+      U.dot.visible = show;
+      U.glint.visible = (this.state === 'aim' || this.state === 'suppress');
+      if(show){
+        this.laserT += dt;
+        U.dot.position.copy(this.markPt);
+        U.dot.scale.setScalar(0.30 + 0.22*Math.sin(game.time*16) + this.drawT*0.42);
+      } else this.laserT = Math.max(0, this.laserT - dt*2);
+      if(U.glint.visible && U.glint.material)
+        U.glint.material.opacity = (0.18 + 0.72*this.drawT)*(0.80 + 0.20*Math.sin(game.time*7));
+      return;
+    }
     U.laser.visible = show; U.dot.visible = show;
     U.glint.visible = (this.state === 'aim' || this.state === 'suppress');
     if(show){
@@ -1930,13 +2418,23 @@ class Enemy {
     }
   }
 
+  /* Можно ли уже спускать. У стрелка это выдержка и луч, побывавший на экране.
+     У лучника — три условия: ПОЛНЫЙ натяг (недотянутый выстрел бот не делает
+     вовсе), решение дуги (без него стрела уходит под ноги цели) и метка
+     падения, которую игрок успел увидеть. */
+  canLoose(k){
+    if(!this.bow) return this.laserT > k;
+    return this.arcOK && this.drawT >= AI_DRAW_TRUE && this.laserT > 0.45;
+  }
+
   /* ------------------------------ прицеливание ------------------------------ */
   aimSolution(){
+    if(this.bow){ this.bowSolution(); return; }
     const T = this.tgt;
     // Цели нет вовсе (сеть, все противники вышли) — бьём по последней
     // известной точке: состояние 'aim' без цели всё равно долго не живёт.
     if(!T){ this.supSolution(); return; }
-    const EV = AMMO[0].v*0.94;
+    const EV = this.am.v*0.94;
     const from = this.eye(AI_v3);
     AI_tgCenter(T, AI_v1);
     if(Math.random() < D.hs) AI_v1.y = AI_tgHeadY(T);
@@ -1960,6 +2458,48 @@ class Enemy {
     this.aimPt.copy(AI_v1);
   }
 
+  /* ------------------------- решение выстрела луком -------------------------
+     Отличается от винтовочного не «другой моделью бота», а другой задачей.
+     Стрела летит втрое медленнее пули и падает в десять раз сильнее: на 100 м
+     просадка 5.24 м против 0.53 м. Бот, наводящий в центр силуэта, кладёт
+     стрелу под ноги — и это ровно то, что игрок читает как «ИИ сломан».
+     Плюс ветер: windMul у стрелы 1.60 против 0.85 у матчевой пули, и при
+     сильном ветре снос на сотне доходит до трёх с половиной метров, то есть
+     до гарантированного промаха. Поэтому решение считает ВСЁ: возвышение,
+     упреждение на реальное время полёта и снос.
+
+     Наружу выходят две разные точки. aimPt — куда СМОТРИТ оружие (точка на
+     луче схода, задранная над целью). markPt — куда стрела придёт; её и
+     показывает телеграф, потому что игроку важно не «куда он целится»,
+     а «куда прилетит». */
+  bowSolution(){
+    const T = this.tgt;
+    if(!T){ this.supSolution(); return; }
+    const mz = this.muzzle(AI_v3);
+    AI_tgCenter(T, AI_v1);
+    if(Math.random() < D.hs) AI_v1.y = AI_tgHeadY(T);
+    const dist = mz.distanceTo(AI_v1);
+    const psp = Math.hypot(T.vx, T.vz);
+    const selfSp = Math.min(1.0, this.speed*0.10);
+    const err = AI_bowErrDeg(dist, psp, this.flinch, this.settleErr, selfSp)*AI_D2R;
+    const a = AI_ARROW;
+    const ok = AI_bowAim(mz.x, mz.y, mz.z, AI_v1.x, AI_v1.y, AI_v1.z, T.vx, T.vy, T.vz,
+                         a.v, a.drag, CFG.bulletG*a.gMul,
+                         wind.x*a.windMul*3.0, wind.z*a.windMul*3.0,
+                         D.lead, err, rnd(0, 6.283));
+    this.applyArc(mz, dist, ok);
+  }
+  /* Общий хвост решений лука: направление схода — в точку прицеливания.
+     Дистанцию берём настоящую, чтобы марка стояла там же, где цель: иначе
+     разворот корпуса и метка падения разъезжаются на глазах. */
+  applyArc(mz, dist, ok){
+    this.markPt.set(AI_ARC.px, AI_ARC.py, AI_ARC.pz);
+    const d = clamp(dist, 2, 300);
+    this.aimPt.set(mz.x + AI_ARC.ux*d, mz.y + AI_ARC.uy*d, mz.z + AI_ARC.uz*d);
+    // Слишком крутая дуга — это выстрел в перекрытие яруса, а не в цель.
+    this.arcOK = ok && AI_ARC.uy < AI_ARC_MAXUP;
+  }
+
   rollSup(){
     // куда именно бить «по краю укрытия» — решаем один раз на выстрел
     this.supA = rnd(0, 6.283);
@@ -1973,13 +2513,26 @@ class Enemy {
     this.aimPt.set(this.kx + Math.cos(this.supA)*this.supR,
                    gy + 1.05 + this.supY,
                    this.kz + Math.sin(this.supA)*this.supR);
+    if(!this.bow) return;
+    // Подавление луком — тот же навес: без возвышения стрела ляжет далеко
+    // перед укрытием и никого ниоткуда не выгонит. Разброс тут уже заложен
+    // в саму точку (rollSup), поэтому угловую ошибку не добавляем.
+    const mz = this.muzzle(AI_v3);
+    AI_v1.copy(this.aimPt);
+    const dist = mz.distanceTo(AI_v1);
+    const a = AI_ARROW;
+    const ok = AI_bowAim(mz.x, mz.y, mz.z, AI_v1.x, AI_v1.y, AI_v1.z, 0, 0, 0,
+                         a.v, a.drag, CFG.bulletG*a.gMul,
+                         wind.x*a.windMul*3.0, wind.z*a.windMul*3.0, 0, 0, 0);
+    this.applyArc(mz, dist, ok);
   }
 
   shoot(){
-    const EV = AMMO[0].v*0.94;
+    if(this.bow){ this.loose(); return; }
+    const EV = this.am.v*0.94;
     const mz = this.muzzle(AI_v1);
     AI_v2.copy(this.aimPt).sub(mz).normalize();
-    const a = AMMO[0];
+    const a = this.am;
     const b = spawnBullet(mz, AI_v2, {v:EV, drag:a.drag, gMul:0.9, windMul:a.windMul, col:0xffd0a0, trail:0xffe0b0, id:'ai'},
                 38*D.dmg, 'enemy', 0);
     // Пулю бота 60_weapon.js сверяет только с локальным игроком: удалённых
@@ -1992,7 +2545,29 @@ class Enemy {
     this.charge = 0;
     this.recoil = 1;
     this.laserT = 0;
-    this.reload = AMMO[0].bolt*rnd(0.9, 1.15);
+    this.reload = this.am.bolt*rnd(0.9, 1.15);
+    this.state = 'shot'; this.stateT = 0;
+  }
+
+  /* Спуск лучника. Всё то же самое, кроме характера: ни дульной вспышки, ни
+     дыма, ни грохота — щелчок тетивы и стрела, которую видно в воздухе.
+     Скорость всегда полная: недотянутый выстрел бот не делает (canLoose). */
+  loose(){
+    const a = AI_ARROW;
+    const mz = this.muzzle(AI_v1);
+    AI_v2.copy(this.aimPt).sub(mz).normalize();
+    const b = spawnBullet(mz, AI_v2, a, AI_ARROW_DMG*D.dmg, 'enemy', 1);
+    // Стрелу бота 60_weapon.js сверяет только с локальным игроком: удалённых
+    // там нет. Берём её на карандаш и досчитываем попадания сами.
+    if(AI_isHost()) AI_trackShot(b);
+    const d = this.pos.distanceTo(camera.position);
+    const dl = Math.min(0.9, d/340), vol = volOf(this.pos), pan = panOf(this.pos);
+    SFX.noise({dur:0.10, f:880, f2:360, q:1.7, g:0.34*vol, pan, delay:dl});
+    SFX.tone({f:210, f2:110, dur:0.18, type:'triangle', g:0.16*vol, pan, delay:dl});
+    this.charge = 0; this.drawT = 0;
+    this.recoil = 1;
+    this.laserT = 0;
+    this.reload = AI_NOCK*rnd(0.9, 1.15);
     this.state = 'shot'; this.stateT = 0;
   }
 
@@ -2067,6 +2642,10 @@ class Enemy {
     const U = this.m.userData;
     U.laser.visible = false; U.dot.visible = false; U.glint.visible = false;
     if(this.fireFx) this.fireFx.visible = false;
+    // Тетива отпускается вместе с бойцом: труп с натянутым луком читается как
+    // «он всё ещё целится».
+    this.drawT = 0;
+    if(this.bow) AI_bowDraw(this.m, 0);
     this.burn = 0; this.noGrav = false; this.mantleT = 0; this.supN = 0;
     const pn = (this.post && this.post.name) ? this.post.name : '';
     this.avoidAdd(this.post, 20);   // на той же точке второй раз умирать не хочется
@@ -2115,6 +2694,14 @@ class Enemy {
 
   respawn(first){
     if(first) SQUAD.reset();
+    /* Сторона и ствол — до всего остального. Сторону читает физика (барьеры
+       баз), ствол решает состав отделения: класс бойца привязан к его номеру
+       и между жизнями не пляшет, иначе игрок не успевает запомнить, кто на
+       карте лучник. */
+    this.team = AI_TEAM;
+    AI_syncLoadout(false);
+    this.setClass(AI_ldBow(this.id));
+    this.drawT = 0; this.arcOK = true;
     // Спавн подальше от противника: появиться прямо под прицел — не бой, а
     // лотерея. В сети «противник» не один, поэтому меряем до ближайшего.
     this.tgt = null;
@@ -2210,6 +2797,7 @@ class Enemy {
     U.armL.E.rotation.x = R.eLx; U.armR.E.rotation.x = R.eRx;
     U.rifle.position.set(R.rifleX, R.hip + R.rifleY, R.rifleZ);
     U.rifle.rotation.set(R.rifRx, 0, 0);
+    if(this.bow) AI_bowDraw(this.m, 0);
     if(this.fireFx) this.fireFx.position.y = 0;
   }
 
@@ -2245,9 +2833,20 @@ class Enemy {
     this.postT += dt;
     if(this.supCd > 0) this.supCd -= dt;
 
+    /* Сторона для физики. Команду ботов меняет запуск матча (aiSetTeam), и
+       перекраска сюда доходит через retint(); но сверка стоит одно сравнение
+       в кадр, а цена рассинхрона — боец, который ходит сквозь чужой барьер. */
+    if(this.team !== AI_TEAM) this.team = AI_TEAM;
+
     this.sense(dt);
     this.brain(dt);
     this.aiming = (this.state === 'aim' || this.state === 'shot' || this.state === 'suppress');
+    /* Натяг: тот же счётчик выдержки, но у лука он ВИДЕН. Тянется только в
+       прицеливании и подавлении, в остальных состояниях тетива отпущена. */
+    if(this.bow){
+      this.drawT = (this.state === 'aim' || this.state === 'suppress')
+        ? clamp(this.charge/Math.max(0.05, this.drawFull), 0, 1) : 0;
+    }
     this.locomote(dt);
 
     const upright = (this.state === 'move' || this.state === 'retreat' ||

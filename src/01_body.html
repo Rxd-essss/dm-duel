@@ -21,8 +21,13 @@
   <div id="hpBarWrap"><div id="hpBar"></div></div>
 
   <div id="ammo" class="panel"><div id="ammoName">МАТЧЕВЫЙ</div><div id="ammoNum">5<small>/45</small></div><div id="ammoCd">ОТКАТ</div></div>
-  <!-- пояс: у каждого типа своя заливка отката (.cd) и остаток секунд (.cdt) -->
+  <!-- пояс: у каждого типа своя заливка отката (.cd) и остаток секунд (.cdt).
+       ЗАЛП стоит первым в том же ряду: он не отдельный режим оружия, а то,
+       что вылетит из выбранного слота, и читаться должен вместе с типом.
+       Кликов не ловит (pointer-events:none) — пояс единственный кликабельный
+       кусок HUD, и плашка внутри него унаследовала бы события у слотов. -->
   <div id="ammoBelt">
+    <div id="volley"><div class="t" id="volTxt">ЗАЛП <b>×3</b></div><div class="s" id="volSub">ОТКАТ ПЛОЩАДНЫХ ×3</div></div>
     <div class="slot a1 act" data-a="0"><div class="cd" id="cdF0"></div><div class="k">1</div><div class="n">МАТЧ</div><div class="cdt" id="cdT0"></div></div>
     <div class="slot a2" data-a="1"><div class="cd" id="cdF1"></div><div class="k">2</div><div class="n">ФУГАС</div><div class="cdt" id="cdT1"></div></div>
     <div class="slot a3" data-a="2"><div class="cd" id="cdF2"></div><div class="k">3</div><div class="n">ЗАЖИГ</div><div class="cdt" id="cdT2"></div></div>
@@ -37,8 +42,15 @@
   <!-- НАТЯГ ЛУКА. Стоит под маркой, а не в левой колонке ресурсов: у лука это
        не фоновый запас вроде дыхания, а то самое значение, ради которого игрок
        держит ЛКМ и смотрит в центр экрана. Пока не тянут — блока нет вовсе,
-       чтобы не засорять рабочую зону. Заполнение ведёт setDrawHUD(). -->
-  <div id="drawWrap"><div class="bar"><div id="drawFill"></div></div><div class="cap" id="drawCap">НАТЯГ</div></div>
+       чтобы не засорять рабочую зону. Заполнение ведёт setDrawHUD().
+       Засечка #drawTick — момент ПОЛНОГО натяга (WPNS[1].drawTrue): с него
+       разброс равен нулю и стрела приходит ровно в марку. Это единственное
+       значение на шкале, ради которого держат тетиву, поэтому оно отмечено
+       и засечкой, и сменой цвета, и короткой вспышкой при достижении. -->
+  <div id="drawWrap"><div class="bar"><div id="drawFill"></div><i id="drawTick"></i></div><div class="cap" id="drawCap">НАТЯГ</div></div>
+  <!-- Дальность по дуге. Саму дугу рисует в 3D оружейный модуль; число,
+       которое по ней не прочитать, — здесь. Видно только в прицеле лука. -->
+  <div id="bowRng"></div>
 
   <div id="xh" class="a1"><div class="h" id="xhU"></div><div class="h" id="xhD"></div><div class="v" id="xhL"></div><div class="v" id="xhR"></div><div class="dot"></div></div>
   <!-- МАРКА ЛУКА. Крест винтовки здесь врёт дважды: стрела приходит в точку
@@ -124,6 +136,11 @@
           <div class="row"><span id="balDropK">Пуля летит по дуге</span><b id="balDropV">время полёта + падение</b></div>
           <div class="row"><span id="balRetK">Метки сетки оптики</span><b id="balRetV">50 … 300 м, шаг 50</b></div>
           <div class="row" id="rowRange"><span>Дальномер по центру</span><b>в оптике</b></div>
+          <!-- Две строки ниже — только про лук: полный натяг и залп. Первая
+               отвечает на главный вопрос игрока («почему стрела ушла мимо
+               марки»), вторая называет цену залпа до того, как он его включит. -->
+          <div class="row" id="rowTrue"><span>Полный натяг</span><b class="arc">разброса нет — точно в марку</b></div>
+          <div class="row" id="rowVolCd"><span>Залп <kbd>СКМ</kbd> три стрелы</span><b style="color:var(--vol)">взрывные и огненные остывают втрое</b></div>
           <div class="row"><span>Боковой ветер</span><b id="balWindV">случайный на бой</b></div>
           <div class="row"><span>Откат по каждому типу</span><b>тикает и у не выбранных</b></div>
           <div class="row"><span>Тип на откате</span><b style="color:var(--a3)">слот погашен, выстрела нет</b></div>
@@ -144,8 +161,11 @@
                неприменимое классом .off, а не прячем: игрок должен видеть, что
                механика существует и чем он за неё заплатил, выбрав лук. -->
           <div class="row"><span>Выстрел</span><b id="ctlFire">ЛКМ</b></div>
-          <div class="row" id="rowDraw"><span>Натяг лука</span><b class="arc">держать ЛКМ, отпустить — выстрел</b></div>
-          <div class="row" id="rowScope"><span>Оптика</span><b id="ctlScopeV">ПКМ</b></div>
+          <div class="row" id="rowDraw"><span>Натяг лука</span><b class="arc" id="ctlDrawV">держать ЛКМ; полный натяг — точно в марку</b></div>
+          <div class="row" id="rowVolley"><span>Залп тремя стрелами</span><b style="color:var(--vol)"><kbd>СКМ</kbd> — откат площадных ×3</b></div>
+          <!-- У лука эта строка не про оптику: ПКМ даёт приближение на 30% и
+               показывает дугу полёта. Поэтому переписывается и ключ, и значение. -->
+          <div class="row" id="rowScope"><span id="ctlScopeK">Оптика</span><b id="ctlScopeV">ПКМ</b></div>
           <div class="row" id="rowZoom"><span>Кратность</span><b>колесо в оптике</b></div>
           <div class="row" id="rowHold"><span>Задержать дыхание</span><b><kbd>Shift</kbd> в оптике</b></div>
           <div class="row"><span id="ctlAmmoK">Тип патрона</span><b><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> / колесо вне оптики</b></div>
@@ -235,6 +255,12 @@
           <div class="row"><span>Юг</span><b style="color:#8fc0dd">лагерь BLU: помосты, башня</b></div>
           <div class="row"><span>Центр</span><b>посад: руины, обелиск, мосты</b></div>
           <div class="row"><span>Наверх и вниз</span><b class="arc">рампы, лестницы, тросы</b></div>
+          <!-- Три правила базы. Барьер держит только ЧУЖИХ и только ногами:
+               стрелы и пули сквозь него летят, поэтому отсидеться на респавне
+               не выйдет — но и вырезать противника на его же спавне нельзя. -->
+          <div class="row"><span>Чужая база</span><b style="color:var(--bad)">барьер: ногами не пройти, выстрел проходит</b></div>
+          <div class="row"><span>Пандус у своей базы</span><b>с базы прямо на ярус, без лестниц</b></div>
+          <div class="row"><span>Появление</span><b>случайное, на одном из ярусов</b></div>
         </div>
       </div>
     </div>
@@ -312,6 +338,9 @@
           <div class="row"><span>Рывок</span><b class="arc"><kbd>Q</kbd></b></div>
           <div class="row"><span>Доп. прыжок / подтягивание</span><b><kbd>Space</kbd></b></div>
           <div class="row"><span>Лестница, трос</span><b><kbd>W</kbd> в зоне</b></div>
+          <!-- Строка лука: две кнопки, которые в бою забываются первыми,
+               потому что у винтовки они делают совсем другое. -->
+          <div class="row" id="rowPauseBow"><span>Залп / прицел лука</span><b style="color:var(--vol)"><kbd>СКМ</kbd> ×3 / <kbd>ПКМ</kbd> дуга</b></div>
           <div class="row"><span>Ваш ствол</span><b id="pauseWpnV">снайперская винтовка</b></div>
           <div class="row"><span>Полный экран</span><b><kbd>F</kbd></b></div>
           <div class="row"><span>Табло в сетевом бою</span><b><kbd>Tab</kbd> — удерживать</b></div>

@@ -13,6 +13,10 @@ const PROP_BANNERS  = [];   // {m, ph, yaw}
 /* Настенные лампы лесопилки. Меш у них неподвижен (склейке не мешают),
    дышит только яркость — поэтому отдельный, самый дешёвый регистр. */
 const PROP_LAMPS    = [];   // {lh, ph, base}
+/* Завесы баз: мерцающее полотно на месте барьера (см. mkWard). Полотно
+   прозрачное, поэтому склейка статики его не трогает (RND_mergeable отсеивает
+   transparent) — менять opacity в кадре безопасно. */
+const PROP_WARDS    = [];   // {mat, lh, ph, base, op}
 
 function gh(x,z){ return terrainH(x,z); }
 
@@ -397,9 +401,17 @@ function PROP_mt(k){
   if(m) return m;
   switch(k){
     /* стены: вертикальная доска, два пояса по высоте */
-    case 'wallD': m = toonT(0x7c4527,'wood',20,1); break;   // низ, тёмный
-    case 'wallU': m = toonT(0x9c6238,'wood',20,1); break;   // верх, светлее
-    case 'wallE': m = toonT(0x8a5230,'wood',20,1); break;   // торцы срубов
+    /* Четыре тона доски. Три из них (wallE → wallU → wallT) идут поясами по
+       ярусам оболочки: шаг светлоты ~15 единиц яркости — этого хватает,
+       чтобы высота читалась по стене, и мало, чтобы посадить кадр. Брать в
+       низ самый тёмный wallD было заманчиво, но замер показал минус 10
+       единиц средней по всему залу, а читаемость силуэта на 100 м дороже
+       настроения (§10.6). wallD остался там, где он и уместен, — на низких
+       перегородках ворот и в тени под настилами. */
+    case 'wallD': m = toonT(0x7c4527,'wood',20,1); break;   // перегородки ворот
+    case 'wallE': m = toonT(0x8a5230,'wood',20,1); break;   // пояс яруса 0
+    case 'wallU': m = toonT(0x9c6238,'wood',20,1); break;   // пояс яруса 1
+    case 'wallT': m = toonT(0xb0764a,'wood',20,1); break;   // пояс ярусов 2–3
     /* несущий брус и стойки */
     case 'beam':  m = toonT(0x5e3820,'wood',0.6,3); break;
     case 'beamL': m = toonT(0x855433,'wood',0.6,3); break;
@@ -409,6 +421,13 @@ function PROP_mt(k){
     case 'deck3': m = toonT(0xc59d66,'plank',3,8); break;
     case 'plank': m = toonT(PAL.plank,'plank',2,1); break;
     case 'plankD':m = toonT(0x8a6440,'plank',2,1); break;
+    /* Ступени маршей — в тон того яруса, КУДА марш ведёт. Это не украшение:
+       игрок обязан понимать по картинке, куда его выведет лестница, а зал
+       собран так, что тон и есть указатель высоты (§10.6). Повторы мельче,
+       чем у настилов: ступень — метровая доска, а не пролёт. */
+    case 'step1': m = toonT(0x8d5c36,'plank',1,2); break;
+    case 'step2': m = toonT(0xab7a4a,'plank',1,2); break;
+    case 'step3': m = toonT(0xc59d66,'plank',1,2); break;
     /* железо, решётка, кровля, земля */
     case 'iron':  m = toonT(PAL.metalDk,'metal',1,1); break;
     case 'rust':  m = toonT(PAL.rust,'rust',1,1); break;
@@ -799,6 +818,50 @@ function mkLockers(x,z,yaw,n,y){
     blk(PROP_wx(x,yaw,o,0.31), y+0.1, PROP_wz(z,yaw,o,0.31), W-0.08, 1.8, 0.06, r, yaw, false, true);
   }
   return y+2.0;
+}
+
+/* ===================== ЗАВЕСА БАЗЫ: ВИДИМЫЙ БАРЬЕР =====================
+   Физику держит addBarrier() из 30_physics.js: свой проходит сквозь, чужой
+   упирается. Но барьер, которого не видно, — это стена из воздуха: игрок
+   бьётся в пустоту и считает игру сломанной. Поэтому на месте барьера стоит
+   читаемая вещь — рунная решётка в раме ворот и мерцающее полотно за ней.
+
+   ВСЁ здесь НЕсплошное (solid:false) и в BOXES не попадает. Так задумано:
+   пуля и стрела обязаны лететь сквозь барьер, иначе защищённая база
+   превращается в укрытие, из которого стреляют безнаказанно.
+
+   Полотну нужен СВОЙ материал, а не общий из PROP_glowMat: тот кэшируется по
+   цвету, и пульсация одной завесы потащила бы за собой все прочие аддитивные
+   пропы того же цвета. */
+function mkWard(x, y0, z, len, h, yaw, col){
+  yaw = yaw || 0; col = col || PAL.arcane;
+  const bm = PROP_mt('beam'), hl = len/2;
+  // рама: стойки по краям створа
+  for(const s of [-1,1])
+    blk(PROP_wx(x,yaw,s*hl,0), y0, PROP_wz(z,yaw,s*hl,0), 0.5, h, 0.5, bm, yaw, false, true);
+  // ригели на канонических высотах ярусов: завеса читается частью постройки,
+  // а не эффектом поверх неё, и заодно показывает, что перекрыты ВСЕ ярусы
+  for(let y = y0; y < y0 + h - 0.3; y += 6)
+    blk(x, y, z, len, 0.3, 0.36, bm, yaw, false, true);
+  // вертикальные рёбра решётки
+  const n = Math.max(2, Math.round(len/3.6));
+  for(let i=1;i<n;i++){
+    const o = -hl + len*i/n;
+    blk(PROP_wx(x,yaw,o,0), y0, PROP_wz(z,yaw,o,0), 0.24, h, 0.24, bm, yaw, false, true);
+  }
+  // полотно: маска 'runeglow' — тёмная везде, кроме резьбы, поэтому в
+  // аддитивном режиме светятся только руны, а вид сквозь створ не мутнеет
+  const vm = new THREE.MeshBasicMaterial({
+    map: TEX.get('runeglow', PROP_rep(len/5.5), PROP_rep(h/5.5)), color: col,
+    transparent:true, opacity:0.30, blending:THREE.AdditiveBlending,
+    depthWrite:false, side:THREE.DoubleSide });
+  const v = new THREE.Mesh(new THREE.PlaneGeometry(len-0.6, h-0.4), vm);
+  v.position.set(x, y0 + h/2, z); v.rotation.y = yaw;
+  v.frustumCulled = false;
+  world.add(v);
+  const lh = LIGHTS.addStatic(V(x, y0 + h*0.22, z), col, 0.8, 15);
+  PROP_WARDS.push({ mat:vm, lh, ph:rnd(0,6.283), base:0.8, op:0.30 });
+  return v;
 }
 
 /* Светящаяся руна на несущей балке: магия как ПОДСВЕТКА дерева, а не второй

@@ -73,7 +73,8 @@ function initInput(){
   document.addEventListener('mousedown', e=>{
     if(game.state!=='play' || !document.pointerLockElement) return;
     if(e.button===0) fireDown();          // винтовка стреляет сразу, лук начинает натяг
-    if(e.button===2) toggleScope();       // на луке молча ничего не делает: оптики нет
+    if(e.button===1){ e.preventDefault(); toggleVolley(); }   // СКМ — залп тремя стрелами
+    if(e.button===2) toggleScope();       // прицел: у винтовки оптика, у лука приближение
   });
   /* Отпускание ЛКМ ловим БЕЗ проверки захвата мыши и состояния игры.
      Причина простая: если кнопку отпустили, когда окно потеряло фокус или
@@ -298,6 +299,9 @@ function loop(now){
 
   NET_ACTIVE = netOn();
   if(NET_ACTIVE) NET.update(dt);          // приём снапшотов и отправка своего состояния
+  /* Сторона игрока нужна физике: барьеры баз пропускают своих и держат чужих.
+     Ставим здесь, а не в респавне, — сторону может сменить и сервер, и меню. */
+  player.team = (typeof playerTeam === 'function') ? playerTeam() : (game.team|0);
 
   if(game.state==='play'){
     game.time += dt;

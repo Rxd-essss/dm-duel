@@ -26,6 +26,10 @@
   --a1:#e9c46a; --a2:#e08a4a; --a3:#e2593f;
   /* магия: рывок, руны, эфир */
   --arc:#62d8ff; --arc-dk:#1d6f96;
+  /* залп тремя стрелами. Свой цвет, а не амбра и не «арканный»: амброй уже
+     помечен активный слот пояса, холодным синим — рывок и всё магическое, а
+     залп это ни то, ни другое — режим огня. Фиолетовый взят из PAL.violet. */
+  --vol:#a878e8; --vol-dk:#5b3d8a;
   --ui: "Arial Black","Arial Bold",Impact,Haettenschweiler,"Franklin Gothic Heavy","Noto Sans",sans-serif;
   --body: "Trebuchet MS","Segoe UI",system-ui,sans-serif;
 }
@@ -97,6 +101,45 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
   100%{box-shadow:0 0 0 2px rgba(255,220,150,0),0 0 0 0 rgba(255,220,150,0)}
 }
 
+/* ---------- ЗАЛП ТРЕМЯ СТРЕЛАМИ (СКМ) ----------
+   Плашка стоит В ОДНОМ РЯДУ с поясом, слева от слотов, а не отдельной панелью
+   в углу: залп не меняет оружие — он меняет то, что вылетит из выбранного
+   слота. Значит и читать его надо там же, где читают тип стрелы, одним
+   движением глаз.
+
+   Кликов плашка не ловит НАМЕРЕННО. #ammoBelt — единственный кусок HUD с
+   pointer-events:auto (тип патрона меняют мышью), и любой новый элемент внутри
+   него унаследовал бы события и воровал бы клики по слотам. Режим переключает
+   СКМ, кнопки здесь нет и быть не должно. */
+#volley{display:none;pointer-events:none;flex:0 0 auto;align-self:stretch;
+  min-width:104px;padding:5px 10px 6px;text-align:center;
+  flex-direction:column;justify-content:center;gap:3px;
+  background:linear-gradient(180deg,#3d3049,#241d2c);border:2px solid var(--edge);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 0 0 2px var(--vol),0 6px 12px rgba(0,0,0,.6);
+  animation:volIn .16s ease-out}
+body.bow #volley.on{display:flex}
+#volley .t{font-family:var(--ui);font-size:15px;line-height:1;letter-spacing:.06em;color:#f0e2ff;
+  text-shadow:0 2px 0 rgba(0,0,0,.6)}
+#volley .t b{color:var(--vol)}
+#volley .s{font-family:var(--ui);font-size:9px;letter-spacing:.08em;color:var(--paper-dim);
+  text-shadow:0 1px 2px rgba(0,0,0,.85)}
+/* стрел в колчане меньше, чем стрел в залпе — цветом тревоги, а не молчанием */
+#volley.short{box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 0 0 2px var(--bad),0 6px 12px rgba(0,0,0,.6)}
+#volley.short .s{color:#ffb0a4}
+@keyframes volIn{from{transform:translateY(6px);opacity:0}}
+
+/* Слот в залпе. Активный обведён амброй всегда, поэтому режим показываем
+   ВТОРЫМ кольцом того же фиолетового, что и плашка: два разных смысла — два
+   разных цвета, и ни один не отменяет другой.
+   Значок «×3» висит на КАЖДОМ типе с откатом, а не только на выбранном: цена
+   залпа — тройной откат площадных, и знать её надо ДО того, как переключился
+   на взрывную, а не после выстрела. */
+.slot.vol{box-shadow:0 0 0 2px var(--vol),0 6px 12px rgba(0,0,0,.6)}
+.slot.act.vol{box-shadow:0 0 0 2px var(--vol),0 0 13px 2px rgba(168,120,232,.55),0 6px 12px rgba(0,0,0,.6)}
+.slot.vol3::after{content:var(--volmul,"×3");position:absolute;right:2px;top:2px;z-index:4;
+  font-family:var(--ui);font-size:9px;letter-spacing:.02em;line-height:12px;padding:0 3px;
+  color:#f2e4ff;background:var(--vol-dk);border:1px solid var(--edge)}
+
 /* перезарядка / затвор */
 #reload{position:absolute;left:50%;bottom:120px;transform:translateX(-50%);width:220px;text-align:center}
 #reload .t{font-family:var(--ui);font-size:12px;letter-spacing:.12em;color:var(--paper-dim);margin-bottom:4px}
@@ -151,15 +194,34 @@ body.bow #drawWrap.on{display:block}
    полосы об одном и том же под маркой — это спор двух модулей за центр экрана.
    #chargeWrap остаётся тем, чем был, — зарядом винтовки. */
 body.bow #chargeWrap{display:none !important}
-#drawWrap .bar{height:7px;background:rgba(10,9,8,.72);border:2px solid rgba(0,0,0,.85)}
+#drawWrap .bar{position:relative;height:7px;background:rgba(10,9,8,.72);border:2px solid rgba(0,0,0,.85)}
 #drawFill{height:100%;width:0;background:linear-gradient(90deg,#6b4a17,#c98f36 62%,var(--gold))}
 #drawWrap .cap{font-family:var(--ui);font-size:10px;letter-spacing:.12em;text-align:center;
   color:var(--paper-dim);margin-top:3px;text-shadow:0 1px 2px #000}
+/* ЗАСЕЧКА ПОЛНОГО НАТЯГА. Единственное число на этой шкале, ради которого
+   игрок вообще держит тетиву: с WPNS[1].drawTrue разброс равен НУЛЮ, и стрела
+   приходит ровно в марку. Позицию ставит HUD_placeTick() из того же поля ядра —
+   вписывать сюда 97% значило бы разойтись с оружием при первой же правке
+   баланса. Всё, что левее засечки, — цена недотяга. */
+#drawTick{position:absolute;top:-4px;bottom:-4px;width:2px;margin-left:-1px;z-index:2;
+  background:var(--paper);box-shadow:0 0 0 1px rgba(0,0,0,.85),0 0 6px rgba(255,255,255,.45)}
 /* полный натяг — единственное состояние, где стрела идёт с полной скоростью
    и кучно; отмечаем его так же, как готовый рывок: холодным свечением */
 #drawWrap.full #drawFill{background:linear-gradient(90deg,#8ee6ff,#d8f7ff)}
 #drawWrap.full .bar{box-shadow:0 0 8px 1px rgba(98,216,255,.5)}
 #drawWrap.full .cap{color:var(--arc)}
+#drawWrap.full #drawTick{background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.85),0 0 9px 2px rgba(142,230,255,.9)}
+/* МОМЕНТ достижения полного натяга. Постоянного свечения мало: игрок смотрит
+   в цель, а не на шкалу, и переход обязан поймать периферийное зрение — иначе
+   он держит тетиву «на всякий случай» лишнюю секунду и теряет выносливость.
+   Одна короткая вспышка на шкале и на кольце марки, дальше — ровный свет. */
+#drawWrap.snap .bar{animation:drawSnap .42s ease-out}
+#drawWrap.snap .cap{animation:drawSnapCap .42s ease-out}
+@keyframes drawSnap{
+  0%{box-shadow:0 0 0 3px #fff,0 0 26px 8px rgba(142,230,255,.95)}
+  100%{box-shadow:0 0 8px 1px rgba(98,216,255,.5)}
+}
+@keyframes drawSnapCap{0%{transform:scale(1.32);color:#fff}100%{transform:scale(1);color:var(--arc)}}
 
 /* прицельная марка без оптики */
 #xh{position:absolute;left:50%;top:50%;width:0;height:0}
@@ -195,6 +257,35 @@ body.bow #scope{display:none !important}
   box-shadow:0 0 0 1px rgba(0,0,0,.5)}
 #xhHold i b{position:absolute;left:19px;top:-6px;font-family:var(--ui);font-weight:normal;font-size:9px;
   letter-spacing:.06em;color:rgba(246,241,228,.55);text-shadow:0 0 3px #000,0 1px 2px #000}
+/* вспышка кольца в момент полного натяга — та же логика, что у шкалы:
+   подтверждение приходит туда, куда игрок и так смотрит */
+#xhBow.snap .ring{animation:bowSnap .42s ease-out}
+@keyframes bowSnap{
+  0%{box-shadow:0 0 0 2px rgba(255,255,255,.95),0 0 18px 6px rgba(233,196,106,.85)}
+  100%{box-shadow:0 0 0 1px rgba(0,0,0,.55),0 0 9px rgba(233,196,106,.55)}
+}
+
+/* ---------- ПРИЦЕЛ ЛУКА (ПКМ) ----------
+   Это НЕ оптика. Ни линзы, ни затемнения по краям, ни снайперской сетки,
+   ни кратности: только приближение на WPNS[1].aimZoom и спокойная марка
+   (WPNS[1].aimSteady). Сетку лук не получает и в коде — updateReticle для
+   лука её просто не собирает.
+
+   Меняем ровно то, что стало точнее: пунктирное кольцо разброса становится
+   сплошным (рука успокоилась), а метки просадки — из фоновых штрихов рабочим
+   инструментом, потому что именно по ним и целятся в этом режиме. */
+#xhBow.aim .ring{border-style:solid;border-color:rgba(246,241,228,.62)}
+#xhBow.aim.full .ring{border-color:var(--gold)}
+#xhBow.aim .hold i{background:rgba(246,241,228,.78);height:2px}
+#xhBow.aim .hold i b{color:rgba(246,241,228,.9)}
+/* Подпись дальности. Сама дуга рисуется в 3D оружейным модулем — здесь только
+   число, которое по дуге не прочитать: куда она придёт и насколько выше цели
+   надо держать. Стоит ПОД шкалой натяга, ниже всех меток просадки: марку и
+   силуэт цели не перекрывает ничто. */
+#bowRng{position:absolute;left:50%;top:calc(50% + 86px);transform:translateX(-50%);display:none;
+  font-family:var(--ui);font-size:11px;letter-spacing:.1em;white-space:nowrap;color:var(--gold);
+  text-shadow:0 0 5px #000,0 1px 2px #000}
+body.bow #bowRng.on{display:block}
 #hitmark{position:absolute;left:50%;top:50%;width:0;height:0;opacity:0}
 #hitmark i{position:absolute;width:15px;height:3px;background:#fff;left:-7.5px;top:-1.5px;box-shadow:0 0 3px #000}
 #hitmark i:nth-child(1){transform:rotate(45deg)}

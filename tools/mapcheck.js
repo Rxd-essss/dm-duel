@@ -278,6 +278,96 @@
   R.info.открытость = { парПроверено: pairs, 'чистыхЛинийОт100м%': +openPct.toFixed(1) };
   if (openPct < 8) warn('§10.3 свободных длинных линий мало даже для зала', +openPct.toFixed(1));
 
+  /* ---------- БАРЬЕРЫ БАЗ: наружу можно, внутрь чужому нельзя ----------
+     Барьер обязан быть односторонним ПО КОМАНДЕ, а не клеткой. Хозяин базы
+     выходит с неё свободно — иначе противник заперт и боя не будет вовсе
+     (ровно эта беда у нас уже случалась с ботами, не выходившими с базы).
+     Проверяем оба направления настоящей физикой, а не намерением. */
+  if (typeof BARRIERS !== 'undefined' && BARRIERS.length) {
+    const probe = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), h: CFG.height,
+                    grounded: true, stepUp: 0, landV: 0, noGrav: false, team: 0 };
+    /* Шагаем сущностью нужной команды из точки в точку и смотрим, докуда дошли.
+
+       Три вещи, без которых заливка МОЛЧА показывает то, чего не проверяла:
+
+       1) Шаг обязан быть длиннее клетки. При 16 кадрах ходьбы боец проходит
+          5.6 * 0.016 * 16 = 1.43 м, а клетка сетки 3 м: округление возвращает
+          ту же клетку, отсев `< G*0.6` съедает остаток, и заливка умирает на
+          первом же узле (ровно один узел, оба вердикта пустые). 44 кадра дают
+          3.94 м — клетку боец покидает гарантированно.
+
+       2) Ярус надо нести с собой. `support(x, z, 1e4)` отдаёт САМУЮ ВЕРХНЮЮ
+          опору в точке, то есть кровлю зала: заливка уезжала гулять по крыше
+          и про базу под ней не узнавала ничего. Потолок поиска — свой ярус
+          плюс шаг, а высота узла кладётся в ключ: зал четырёхъярусный, и
+          «та же клетка на другом ярусе» — это другое место.
+          Параметр sy для этого и заводился, но в теле не использовался.
+
+       3) Точка появления теперь не одна на базу и не только на полу, поэтому
+          «чужой дошёл» проверяем по ВСЕМ точкам стороны и по всем ярусам. */
+    const G = 3, FR = 44;
+    const kOf = (x, z, y) => x + ',' + z + ',' + Math.round(y / 3);
+    const reach = (team, sx, sz, sy, limit) => {
+      const seen = Object.create(null);
+      const q = [[Math.round(sx / G) * G, Math.round(sz / G) * G, sy]];
+      seen[kOf(q[0][0], q[0][1], sy)] = 1;
+      let best = 1e9, guard = 0;
+      while (q.length && guard++ < limit) {
+        const c = q.shift();
+        const d0 = Math.hypot(c[0], c[1]);
+        if (d0 < best) best = d0;
+        const cy = support(c[0], c[1], c[2] + CFG.step);
+        for (let d = 0; d < 8; d++) {
+          const a = d * Math.PI / 4, dx = Math.cos(a), dz = Math.sin(a);
+          probe.pos.set(c[0], cy, c[1]); probe.vel.set(0, 0, 0);
+          probe.grounded = true; probe.noGrav = false; probe.team = team;
+          probe.h = CFG.height;
+          for (let f = 0; f < FR; f++) {
+            probe.vel.x = dx * CFG.walk; probe.vel.z = dz * CFG.walk;
+            moveHoriz(probe, 0.016); moveVert(probe, 0.016);
+          }
+          if (!probe.grounded) continue;              // в полёте — это не узел
+          const nx = Math.round(probe.pos.x / G) * G, nz = Math.round(probe.pos.z / G) * G;
+          const k = kOf(nx, nz, probe.pos.y);
+          if (seen[k] || Math.hypot(nx - c[0], nz - c[1]) < G * 0.6) continue;
+          seen[k] = 1; q.push([nx, nz, probe.pos.y]);
+        }
+      }
+      return { seen, nearestToCenter: best, узлов: Object.keys(seen).length };
+    };
+    const seenAt = (seen, p) => {
+      const x = Math.round(p.x / G) * G, z = Math.round(p.z / G) * G;
+      for (let t = -1; t < 9; t++) if (seen[x + ',' + z + ',' + t]) return true;
+      return false;
+    };
+    const sides = [{ t: 0, sp: SPAWNS_BLU }, { t: 1, sp: SPAWNS_RED }];
+    R.info.барьеры = { штук: BARRIERS.length };
+    for (const s of sides) {
+      if (!s.sp.length) continue;
+      const nm = s.t ? 'RED' : 'BLU';
+      const p0 = s.sp[0];
+      const y0 = (p0.y !== undefined) ? p0.y : terrainH(p0.x, p0.z);
+      // 1. ХОЗЯИН обязан выйти со своей базы к центру карты
+      const own = reach(s.t, p0.x, p0.z, y0, 2400);
+      R.info.барьеры['свой' + nm + 'ДоцентраМ'] = +own.nearestToCenter.toFixed(0);
+      R.info.барьеры['свой' + nm + 'Узлов'] = own.узлов;
+      if (own.узлов < 50)
+        bad('заливка своей команды ' + nm + ' не пошла: узлов ' + own.узлов);
+      else if (own.nearestToCenter > 30)
+        bad('барьер запер СВОЮ команду ' + nm + ' на базе: ближе ' +
+            own.nearestToCenter.toFixed(0) + ' м к центру не вышли');
+      // 2. ЧУЖОЙ не должен попасть внутрь: идём с пола центра и не должны
+      //    достать ни одной точки появления хозяина ни на одном ярусе
+      const foe = reach(s.t ^ 1, 0, 0, terrainH(0, 0), 3200);
+      let got = 0;
+      for (const q of s.sp) if (seenAt(foe.seen, q)) got++;
+      R.info.барьеры['чужойУзлов' + nm] = foe.узлов;
+      R.info.барьеры['чужойДостигСпавнов' + nm] = got;
+      if (foe.узлов < 50) bad('заливка чужой команды к ' + nm + ' не пошла: узлов ' + foe.узлов);
+      if (got) bad('барьер не держит чужого: с центра дошли до ' + got + ' точек появления ' + nm);
+    }
+  }
+
   /* ---------- сводка по геометрии переходов ---------- */
   R.info.геометрия = {
     рамп: (typeof RAMPS !== 'undefined') ? RAMPS.length : 'нет',

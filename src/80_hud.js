@@ -17,6 +17,12 @@ const HUD_cdTxt  = [null,null,null]; // секунды до готовности
 const HUD_beltNm = [null,null,null]; // подпись типа в слоте: «МАТЧ» / «СТРЕЛА»
 const HUD_beltRf = [null,null,null]; // какой элемент AMMO в слоте уже нарисован
 const HUD_prevCd = [0,0,0];          // остаток отката в прошлом кадре
+/* Полный откат типа, запомненный в МОМЕНТ выстрела. Делить остаток на
+   AMMO[i].cd больше нельзя: в режиме залпа оружейный модуль ставит площадным
+   типам откат втрое длиннее, и заливка слота стояла бы в потолке две трети
+   ожидания. Запоминаем то, что реально выставили, — и HUD остаётся честным
+   при любом множителе, не зная про него ничего. */
+const HUD_cdTot  = [0,0,0];
 const HUD_rdyT   = [0,0,0];          // таймер вспышки «снова готов»
 const HUD_pct    = [-1,-1,-1];       // закешированная высота заливки
 const HUD_dec    = [-1,-1,-1];       // закешированные десятые доли секунды
@@ -94,6 +100,18 @@ function clearHudTimers(){
   // вспышка урона могла остаться зажжённой: её гасил как раз снятый таймер
   const v = $('dmgvig'); if(v){ v.style.opacity = 0; }
   HUD_dmgA = -1; HUD_dmgT = 0;
+  // то же со вспышкой полного натяга: снятый таймер её больше не погасит,
+  // и новый бой начался бы с намертво светящейся шкалой
+  HUD_snapT = 0; HUD_snapOff();
+  /* Режимы лука новый бой начинает с чистого листа. Признак придёт из
+     оружейного модуля на первом же кадре, а вот закешированное «уже
+     нарисовано» пережило бы рестарт и оставило на экране плашку залпа
+     от прошлого матча. */
+  HUD_volShown = null; HUD_volSubK = -1; HUD_volExt = false; HUD_volAge = 99;
+  HUD_bowAimShown = null; HUD_bowAimExt = false; HUD_bowAimAge = 99;
+  HUD_applyVolley(false, HUD_volCfg());
+  HUD_applyBowAim(false);
+  for(let i=0;i<3;i++) HUD_cdTot[i] = 0;
 }
 
 /* ============================ СТОРОНА ИГРОКА ============================
@@ -249,7 +267,7 @@ const HUD_AMMO_DESC = {
    подвал брифинга и так впритык, а подробности лежат в колонке раскладки. */
 const HUD_WPN_LMB = [
   '<b>ЛКМ</b> — выстрел, <b>ПКМ</b> — оптика.',
-  '<b>ЛКМ</b> — держать и отпустить: тянут тетиву, потом пускают.'
+  '<b>ЛКМ</b> — держать и отпустить, <b>ПКМ</b> — прицел и дуга, <b>СКМ</b> — залп тремя стрелами.'
 ];
 let HUD_wantWpn  = 0;    // выбор игрока в брифинге
 let HUD_wpnShown = -1;   // какой ствол уже нарисован; -1 — перерисовать
@@ -280,9 +298,13 @@ function HUD_syncWeapon(){
   HUD_paintWpnSel();
   HUD_paintAmmoCards();
   HUD_paintBelt();
+  HUD_placeTick();
   // подписи и заливки закешированы по числам — числа те же, а смысл другой
   HUD_numKey = -1; HUD_nameTxt = ''; HUD_scKey = -1; HUD_cdDecCur = -1; HUD_aimCapK = -1;
-  for(let k=0;k<3;k++){ HUD_pct[k] = -1; HUD_dec[k] = -1; }
+  HUD_volSubK = -1; HUD_volNK = -1; HUD_rngK = -1e9; HUD_markKey = -1; HUD_drawCapK = -1;
+  // откаты у стволов разные, и запомненный «полный откат» прошлого ствола
+  // растянул бы заливку слота на чужую длительность
+  for(let k=0;k<3;k++){ HUD_pct[k] = -1; HUD_dec[k] = -1; HUD_cdTot[k] = 0; }
   if(typeof updateReticle === 'function') updateReticle();
   return i;
 }
@@ -324,7 +346,11 @@ function HUD_paintWpnSel(){
   const h = $('wpnHint'); if(h) h.innerHTML = HUD_WPN_LMB[bow ? 1 : 0];
   HUD_txt('ammoSec',   bow ? 'Колчан' : 'Боекомплект');
   HUD_txt('ctlFire',   bow ? 'ЛКМ — держать, отпустить' : 'ЛКМ');
-  HUD_txt('ctlScopeV', bow ? 'у лука её нет' : 'ПКМ');
+  /* ПКМ у лука — не оптика, а приближение с показом дуги, поэтому у строки
+     меняется и ключ. Проценты берём из ядра: WPNS[1].aimZoom правится одной
+     строкой, и вписанное сюда «30%» разошлось бы с оружием молча. */
+  HUD_txt('ctlScopeK', bow ? 'Прицел лука' : 'Оптика');
+  HUD_txt('ctlScopeV', bow ? ('ПКМ — ближе на '+HUD_aimZoomPct()+'%, видна дуга') : 'ПКМ');
   HUD_txt('ctlAmmoK',  bow ? 'Тип стрелы' : 'Тип патрона');
   HUD_txt('ruleChargeV', bow ? 'растёт с натягом' : 'растёт с зарядом');
   HUD_txt('ruleAimK',    bow ? 'Недотянутая тетива' : 'Стрельба без оптики');
@@ -336,10 +362,22 @@ function HUD_paintWpnSel(){
                              : '50 … 300 м, шаг 50');
   HUD_txt('balWindV',    bow ? 'сносит стрелу вдвое сильнее' : 'случайный на бой');
   HUD_txt('pauseWpnV',   bow ? 'боевой лук' : 'снайперская винтовка');
-  HUD_off('rowScope', bow); HUD_off('rowZoom', bow); HUD_off('rowHold', bow);
+  /* Гасим (.off) то, чего у лука нет вовсе, — кратность, задержку дыхания,
+     дальномер. Строку ПКМ больше НЕ гасим: у лука она работает, просто иначе.
+     Прячем (.hide) то, что у винтовки не существует как механика: натяг,
+     залп, полный натяг — их незачем показывать серым, они просто не про неё. */
+  HUD_off('rowZoom', bow); HUD_off('rowHold', bow);
   HUD_off('rowRange', bow);
-  const rd = $('rowDraw'); if(rd) rd.classList.toggle('hide', !bow);
+  HUD_only('rowDraw',   bow);
+  HUD_only('rowVolley', bow);
+  HUD_only('rowTrue',   bow);
+  HUD_only('rowVolCd',  bow);
+  HUD_only('rowPauseBow', bow);
+  HUD_txt('ctlDrawV', 'держать ЛКМ; полный натяг — точно в марку');
 }
+/* Показать строку только для одного ствола. Отдельно от HUD_off намеренно:
+   .off — «механика есть, но не у этого ствола», .hide — «механики нет». */
+function HUD_only(id, on){ const e = $(id); if(e) e.classList.toggle('hide', !on); }
 function HUD_txt(id, s){ const e = $(id); if(e && e.textContent !== s) e.textContent = s; }
 function HUD_off(id, on){ const e = $(id); if(e) e.classList.toggle('off', on); }
 
@@ -483,28 +521,84 @@ function setDashHUD(ratio, ready){
    Кольцо марки — не украшение: недотянутый лук бьёт вразброс, и радиус
    кольца это и показывает. На полном натяге кольцо замыкается и золотеет. */
 let HUD_drawPct = -1, HUD_drawFull = null, HUD_drawOn = null;
-let HUD_drawAge = 99, HUD_ringPx = -1;
+let HUD_drawAge = 99, HUD_ringPx = -1, HUD_drawCapK = -1;
 const HUD_RING_MIN = 9;     // радиус кольца на полном натяге, px
 const HUD_RING_MAX = 35;    // и на отпущенной тетиве
+
+/* Порог полного натяга берём из ядра, а не из «почти единицы». Разница не
+   косметическая: WPNS[1].drawTrue = 0.97, и последние три процента шкалы уже
+   бьют без разброса. Считать полным только 100% значило бы врать игроку ровно
+   в том месте, ради которого шкала и нарисована. */
+function HUD_drawTrue(){
+  const w = WPNS[1], t = w ? +w.drawTrue : 0;
+  return (t > 0.05 && t <= 1) ? t : 1;
+}
+/* Засечку ставим по тому же полю. Пересчитывается при смене ствола — цена
+   одна запись в style на матч, зато правка баланса в ядре доезжает сама. */
+let HUD_tickSet = -1;
+function HUD_placeTick(){
+  const t = HUD_drawTrue();
+  if(t === HUD_tickSet) return;
+  HUD_tickSet = t;
+  const el = $('drawTick'); if(el) el.style.left = (t*100).toFixed(1)+'%';
+}
+
+/* ВСПЫШКА ПОЛНОГО НАТЯГА. Класс снимаем и возвращаем через принудительный
+   пересчёт стиля: без него второй полный натяг подряд (отпустил — снова
+   потянул) не перезапустил бы CSS-анимацию, и подтверждение пришло бы только
+   к первому выстрелу. Чтение offsetWidth стоит одной раскладки и случается
+   не чаще раза на натяг, а не в кадре. */
+let HUD_snapT = 0;
+function HUD_snapOff(){
+  const w = $('drawWrap'); if(w) w.classList.remove('snap');
+  const b = $('xhBow');    if(b) b.classList.remove('snap');
+}
+function HUD_drawSnap(){
+  if(HUD_snapT) HUD_cancel(HUD_snapT);
+  HUD_snapOff();
+  const w = $('drawWrap'), b = $('xhBow');
+  if(w){ void w.offsetWidth; w.classList.add('snap'); }
+  if(b) b.classList.add('snap');
+  HUD_snapT = HUD_after(()=>{ HUD_snapT = 0; HUD_snapOff(); }, 440);
+}
+
 function HUD_applyDraw(r, full){
   const pct = Math.round(r*100);
   if(pct !== HUD_drawPct){
     HUD_drawPct = pct;
     const f = $('drawFill'); if(f) f.style.width = pct+'%';
-    const c = $('drawCap');  if(c) c.textContent = full ? 'ПОЛНЫЙ НАТЯГ' : 'НАТЯГ '+pct+'%';
     // радиус кольца ведём в целых пикселях: доли на глаз не читаются,
-    // а лишняя запись в style — это лишний пересчёт стиля каждый кадр
-    const px = Math.round(HUD_RING_MIN + (1-r)*(HUD_RING_MAX-HUD_RING_MIN));
+    // а лишняя запись в style — это лишний пересчёт стиля каждый кадр.
+    // Считаем от drawTrue, а не от единицы: кольцо обязано схлопнуться ровно
+    // там, где разброс становится нулевым, иначе оно спорит с засечкой.
+    const k = clamp(r/HUD_drawTrue(), 0, 1);
+    const px = Math.round(HUD_RING_MIN + (1-k)*(HUD_RING_MAX-HUD_RING_MIN));
     if(px !== HUD_ringPx){
       HUD_ringPx = px;
       const g = $('xhRing');
       if(g){ const d = px*2; g.style.width = d+'px'; g.style.height = d+'px'; }
     }
   }
+  /* Подпись зависит И от процента, И от достижения полного натяга — свой ключ
+     у неё именно поэтому. Держать её в ветке процента нельзя: drawTrue = 0.97,
+     и «недотянуто на волос» с «уже в марку» округляются в одни и те же 97%.
+     Игрок в этот кадр видел бы золотую шкалу с подписью «НАТЯГ 97%», то есть
+     ровно там, где HUD обязан быть однозначным, он бы спорил сам с собой.
+     Текст называет выигрыш, а не состояние: что натяг полный, видно по цвету,
+     а что стрела теперь придёт точно в марку — нет. */
+  const capK = pct*2 + (full?1:0);
+  if(capK !== HUD_drawCapK){
+    HUD_drawCapK = capK;
+    const c = $('drawCap'); if(c) c.textContent = full ? 'ПОЛНЫЙ НАТЯГ · В МАРКУ' : 'НАТЯГ '+pct+'%';
+  }
   if(full !== HUD_drawFull){
+    // именно ПЕРЕХОД в полный натяг, а не первая отрисовка: на старте матча
+    // HUD_drawFull равен null, и вспышка там была бы вспышкой ни о чём
+    const rise = (HUD_drawFull === false && full);
     HUD_drawFull = full;
     const w = $('drawWrap'); if(w) w.classList.toggle('full', full);
     const b = $('xhBow');    if(b) b.classList.toggle('full', full);
+    if(rise) HUD_drawSnap();
   }
   // пока не тянут — полосы нет вовсе: центр экрана это рабочая зона
   const on = r > 0.001;
@@ -514,11 +608,145 @@ function HUD_applyDraw(r, full){
   }
 }
 /* Публичный сеттер для оружейного модуля. ratio 0..1 — насколько натянут лук,
-   ready — можно ли уже пускать в полную силу (по умолчанию «натянут до конца»). */
+   ready — достигнут ли натяг, с которого стрела идёт БЕЗ разброса (по
+   умолчанию сравниваем с WPNS[1].drawTrue). */
 function setDrawHUD(ratio, ready){
   HUD_drawAge = 0;
   const r = clamp(+ratio || 0, 0, 1);
-  HUD_applyDraw(r, ready===undefined ? (r >= 0.999) : !!ready);
+  HUD_applyDraw(r, ready===undefined ? (r >= HUD_drawTrue()-1e-4) : !!ready);
+}
+
+/* ====================== ЗАЛП ТРЕМЯ СТРЕЛАМИ (СКМ) ======================
+
+   Режим включает оружейный модуль (СКМ повешена на toggleVolley в 90_game.js),
+   HUD его только показывает. Признак — wpn.volley, флаг в общем литерале ствола
+   рядом с wpn.scoped и wpn.aim. Запасной источник — сеттер setVolleyHUD(on):
+   HUD не имеет права погаснуть, если модуль соберут версией, где режим
+   толкают вызовом, а не полем. Ровно так же устроены шкала натяга
+   (setDrawHUD / wpn.draw) и шкала рывка.
+
+   Числа залпа — из ядра: WPNS[1].volley.{n,cdMul}. Ни «три», ни «втрое» в
+   разметке не зашиты, иначе правка баланса разойдётся с подписью молча. */
+const HUD_VOL_DEF = { n:3, cdMul:3 };
+function HUD_volCfg(){
+  const w = WPNS[1], v = w ? w.volley : null;
+  return (v && v.n > 0) ? v : HUD_VOL_DEF;
+}
+let HUD_volExt = false, HUD_volAge = 99;
+let HUD_volShown = null, HUD_volSubK = -1, HUD_volNK = -1;
+function setVolleyHUD(on){ HUD_volAge = 0; HUD_volExt = !!on; }
+function HUD_volleyOn(){
+  if(HUD_wpnShown !== 1) return false;          // залп — механика лука
+  // булев флаг главнее сеттера: он и есть состояние режима. Объект в этом
+  // поле — это конфиг залпа из ядра, а не признак, и признаком не считается
+  const v = wpn.volley;
+  if(typeof v === 'boolean' || typeof v === 'number') return !!v;
+  if(HUD_volAge <= 0.25) return HUD_volExt;
+  return false;
+}
+function HUD_applyVolley(on, cfg){
+  const n = cfg.n|0, mul = (cfg.cdMul|0) || 3;
+  const nk = n*100 + mul;
+  if(nk !== HUD_volNK){
+    HUD_volNK = nk;
+    const t = $('volTxt'); if(t) t.innerHTML = 'ЗАЛП <b>×'+n+'</b>';
+    /* Значок «×N» на слотах рисует CSS через ::after, а множитель живёт в
+       ядре. Передаём его переменной на поясе: так значок остаётся одним
+       правилом без узла на слот, но врать про множитель уже не может. */
+    const belt = $('ammoBelt');
+    if(belt) belt.style.setProperty('--volmul', '"×'+mul+'"');
+  }
+  if(on !== HUD_volShown){
+    const first = (HUD_volShown === null);
+    HUD_volShown = on;
+    const box = $('volley'); if(box) box.classList.toggle('on', on);
+    /* Смену режима объявляем строкой статуса ровно один раз на переключение:
+       она сама погаснет по HUD_STATUS_TTL, держать её кадрами незачем. На
+       первой отрисовке молчим — это не переключение, а старт матча. */
+    if(!first){
+      if(on) setStatus('volley', 'ЗАЛП ×'+n+' · ПЛОЩАДНЫЕ ОСТЫВАЮТ ×'+(cfg.cdMul|0 || 3), '#a878e8');
+      else { clearStatus('volley'); setStatus('volley', 'ОДИНОЧНЫЙ ВЫСТРЕЛ', '#c9bda6'); }
+    }
+  }
+  /* Не хватает стрел на полный залп — это надо видеть до нажатия, а не по
+     тому, что вылетела одна. Ключ склеиваем из остатка, чтобы не писать
+     в DOM каждый кадр. */
+  const left = on ? (wpn.loaded[wpn.idx]|0) : n;
+  const short = on && left < n;
+  const subK = on ? (short ? 100+left : 1) : 0;
+  if(subK !== HUD_volSubK){
+    HUD_volSubK = subK;
+    const box = $('volley'); if(box) box.classList.toggle('short', short);
+    const s = $('volSub');
+    if(s) s.textContent = short ? ('СТРЕЛ '+left+' ИЗ '+n)
+                                : ('ОТКАТ ПЛОЩАДНЫХ ×'+(cfg.cdMul|0 || 3));
+  }
+}
+
+/* ========================= ПРИЦЕЛ ЛУКА (ПКМ) =========================
+
+   Не оптика: ни линзы, ни сетки, ни кратности — приближение на
+   WPNS[1].aimZoom и спокойная марка (WPNS[1].aimSteady). Признак даёт оружейный
+   модуль полем wpn.aim (рядом с ним лежит wpn.aimK — та же величина, сглаженная
+   по кадрам; HUD хватает булева). Запасные источники — сеттер setBowAimHUD(on)
+   и wpn.scoped: ПКМ у обоих стволов ходит через один toggleScope(), и если
+   модуль соберут прежней версией, «прицел» всё равно найдётся. */
+function HUD_aimZoomPct(){
+  const w = WPNS[1], z = w ? +w.aimZoom : 0;
+  return Math.round((z > 0 ? z : 0.30)*100);
+}
+let HUD_bowAimExt = false, HUD_bowAimAge = 99, HUD_bowAimShown = null;
+function setBowAimHUD(on){ HUD_bowAimAge = 0; HUD_bowAimExt = !!on; }
+function HUD_bowAimOn(){
+  if(HUD_wpnShown !== 1) return false;
+  if(typeof wpn.aim === 'boolean') return wpn.aim;
+  if(HUD_bowAimAge <= 0.25) return HUD_bowAimExt;
+  return !!wpn.scoped;
+}
+function HUD_applyBowAim(on){
+  if(on === HUD_bowAimShown) return;
+  HUD_bowAimShown = on;
+  const b = $('xhBow'); if(b) b.classList.toggle('aim', on);
+  const r = $('bowRng'); if(r) r.classList.toggle('on', on);
+  HUD_rngK = -1e9;
+}
+
+/* Подпись дальности по дуге. Саму дугу рисует в 3D оружейный модуль — он и так
+   марширует её по коробкам, поэтому точку падения знает точно. Если он её
+   публикует (wpn.arcD, метры), берём готовое число.
+
+   Если не публикует, HUD считает то, что может посчитать САМ и без единого
+   лишнего луча: дальность до марки берётся из общего кэша camRayDist (его же
+   каждый кадр опрашивает кольцо зоны поражения), а просадка — той же формулой
+   HUD_drop, что рисует метки под маркой. Гонять собственный марш дуги по всем
+   BOXES ради подписи HUD не имеет права: это десятки rayBoxes в секунду
+   за число, которое рядом уже посчитано. */
+let HUD_rngT = 0, HUD_rngK = -1e9;
+function HUD_bowRange(dt, a){
+  if(!HUD_bowAimShown) return;
+  HUD_rngT -= dt;
+  if(HUD_rngT > 0) return;
+  HUD_rngT = 0.1;
+  const el = $('bowRng'); if(!el) return;
+  const arc = wpn.arcD;
+  let key, txt;
+  if(typeof arc === 'number' && arc > 0 && arc < 1000){
+    key = Math.round(arc);
+    if(key === HUD_rngK) return;
+    txt = 'ПАДЕНИЕ ' + key + ' М';
+  }else{
+    let d = 0;
+    try{ if(typeof camRayDist === 'function') d = camRayDist(300); }catch(e){}
+    if(!(d > 0)) return;
+    const drop = HUD_drop(a, d);
+    // ключ второй ветки уводим в минус: у первой он всегда положительный,
+    // и одно поле обслуживает оба источника без путаницы
+    key = -(Math.round(d)*1000 + Math.round(drop*10));
+    if(key === HUD_rngK) return;
+    txt = 'ДО МАРКИ ' + Math.round(d) + ' М · ВЫШЕ ' + drop.toFixed(1) + ' М';
+  }
+  HUD_rngK = key;
+  el.textContent = txt;
 }
 
 let HUD_burnOn = false, HUD_burnExt = false;
@@ -616,14 +844,29 @@ function updateAmmoHUD(){
   }
   if(HUD_nameTxt !== a.name){ HUD_nameTxt = a.name; $('ammoName').textContent = a.name; }
 
+  // режим залпа: читаем признак один раз на кадр — его спрашивают и слоты, и
+  // плашка, и строка статуса
+  const volCfg = HUD_volCfg();
+  const volley = HUD_volleyOn();
+
   // слоты пояса: заливка отката, секунды, гашение
   for(let i=0;i<3;i++){
     const s = HUD_slots[i]; if(!s) continue;
-    const total = AMMO[i].cd || 0;
+    const base  = AMMO[i].cd || 0;
     const left  = cds[i] > 0 ? cds[i] : 0;
+    /* Момент, когда откат ЗАПУСТИЛИ: остаток вырос по сравнению с прошлым
+       кадром. Только здесь и можно узнать его полную длину, не зная, был ли
+       выстрел одиночным или залпом. */
+    if(left > HUD_prevCd[i] + 1e-4) HUD_cdTot[i] = Math.max(left, base);
+    else if(left <= 0) HUD_cdTot[i] = 0;
+    const total = HUD_cdTot[i] > 0 ? HUD_cdTot[i] : base;
     s.classList.toggle('act', i===wpn.idx);
     s.classList.toggle('empty', wpn.loaded[i]===0 && wpn.res[i]===0);
     s.classList.toggle('cool', left>0);
+    // подсветка залпа: кольцо — на выбранном слоте, значок «×N» — на каждом
+    // типе с откатом, потому что цену залпа платят именно они
+    s.classList.toggle('vol',  volley && i===wpn.idx);
+    s.classList.toggle('vol3', volley && base>0);
     const pct = total>0 ? Math.round(clamp(left/total,0,1)*100) : 0;
     if(pct !== HUD_pct[i]){ HUD_pct[i] = pct; HUD_cdFill[i].style.height = pct+'%'; }
     const dec = left>0 ? Math.ceil(left*10) : 0;
@@ -671,8 +914,20 @@ function updateAmmoHUD(){
   HUD_drawAge += dt;
   if(HUD_drawAge > 0.25){
     const d = (HUD_wpnShown === 1 && typeof wpn.draw === 'number') ? clamp(wpn.draw, 0, 1) : 0;
-    HUD_applyDraw(d, d >= 0.999);
+    HUD_applyDraw(d, d >= HUD_drawTrue()-1e-4);
   }
+
+  /* Залп и прицел лука. Возраст сеттеров тикаем ЗДЕСЬ, а не в них самих:
+     функция, которую перестали звать, себя состарить не может, а признак
+     обязан вернуться к чтению флага сразу, как модуль замолчал. */
+  HUD_volAge += dt; HUD_bowAimAge += dt;
+  HUD_applyVolley(volley, volCfg);
+  HUD_applyBowAim(HUD_bowAimOn());
+  /* Метки просадки пересчитываем каждый кадр — они сами решают, изменилось ли
+     что-нибудь. Иначе прицел лука (обзор сужается на aimZoom) уезжал бы
+     вместе с картинкой, а метки оставались бы на прежних пикселях и врали
+     ровно на величину приближения. */
+  if(HUD_wpnShown === 1){ HUD_bowMarks(a, false); HUD_bowRange(dt, a); }
 
   // подпись в оптике: тип, боезапас или остаток отката
   if(wpn.sT>0.6){
@@ -806,21 +1061,39 @@ function HUD_drop(a, r){
 /* Дальности меток. У лука стрела на трёхстах метрах уже не боеприпас, а
    навесной подарок — шкалу сжимаем под реальные дистанции боя из лука. */
 const HUD_HOLD_R    = [40, 70, 100];                 // метки под маркой лука
-const HUD_RNG_RIFLE = [50,100,150,200,250,300];
-const HUD_RNG_BOW   = [20, 40, 60, 80, 100, 120];
+const HUD_RNG_RIFLE = [50,100,150,200,250,300];      // и метки в сетке оптики
 
 /* Метки просадки под маркой лука. Оптики у лука нет, а держать поправку в
    голове невозможно: на сотне метров стрела проседает метров на шесть, и без
    опорных штрихов «выше цели» превращается в гадание. Пересчитываем при смене
    типа стрелы, обзора и размера окна — updateReticle зовут ровно тогда. */
-function HUD_bowMarks(a){
+/* Живой обзор камеры — единственная правда о масштабе. В прицеле лука он
+   сужается на WPNS[1].aimZoom, и метки просадки обязаны уехать вместе с
+   картинкой: иначе поправка врёт ровно на величину приближения — то есть
+   именно в том режиме, ради точности которого её и включают.
+   camera объявлена в 20_render.js и на верхнем уровне может быть ещё пустой
+   (hudInit зовёт updateReticle до initThree) — тогда берём обзор из настроек. */
+function HUD_fovNow(){
+  let f = 0;
+  try{ f = camera && camera.fov; }catch(e){}
+  return (f > 1 && f < 179) ? f : game.fov;
+}
+const HUD_MARK_FOV = 0.25;      // мельче четверти градуса метки не двигаются
+let HUD_markKey = -1, HUD_markRef = null;
+function HUD_bowMarks(a, force){
   const hold = $('xhHold'); if(!hold) return;
   /* До первого onResize (и у скрытой вкладки) H равен нулю, и все три метки
      сложились бы в одну точку под центром — а перерисовать их некому до
      следующей смены типа. Берём запасную высоту: она всё равно уточнится
      первым же onResize, который зовёт updateReticle. */
   const vh = H > 1 ? H : (window.innerHeight || 720);
-  const f = (vh/2)/Math.tan(game.fov*Math.PI/360);  // пикселей на радиан у центра
+  const fov = HUD_fovNow();
+  // зовётся каждый кадр, поэтому первым делом — «ничего не изменилось»:
+  // обзор в четверть градуса, высота окна и текущий тип стрелы
+  const key = Math.round(fov/HUD_MARK_FOV)*4096 + (vh|0);
+  if(!force && key === HUD_markKey && a === HUD_markRef) return;
+  HUD_markKey = key; HUD_markRef = a;
+  const f = (vh/2)/Math.tan(fov*Math.PI/360);       // пикселей на радиан у центра
   const kids = hold.children;
   for(let i=0;i<kids.length && i<HUD_HOLD_R.length;i++){
     const r = HUD_HOLD_R[i];
@@ -834,7 +1107,17 @@ function HUD_bowMarks(a){
 function updateReticle(){
   const a = A();
   const bow = !!weaponOf(game.weapon).bow;
-  if(bow) HUD_bowMarks(a);
+  /* У лука оптики нет, и снайперской сетки быть не должно ни при каких
+     условиях. Её мало спрятать стилем: сетка — это полтора килобайта строки и
+     разбор innerHTML при каждой смене типа, обзора и размера окна. Для лука
+     она просто не собирается, а поле линзы очищается — чтобы ничей случайный
+     display:block не вытащил на экран чужую марку. */
+  if(bow){
+    HUD_bowMarks(a, true);
+    const sv = $('retSvg'); if(sv && sv.innerHTML !== '') sv.innerHTML = '';
+    HUD_scKey = -1;
+    return;
+  }
   const fov = ZOOMS[wpn.zoom];
   const f = (H/2)/Math.tan(fov*Math.PI/360);
   const lensPx = 0.80*Math.min(W,H);
@@ -861,18 +1144,16 @@ function updateReticle(){
     }
   }
 
-  // метки падения пули под текущий боеприпас и кратность — в цвет типа
-  const ranges = bow ? HUD_RNG_BOW : HUD_RNG_RIFLE;
-  for(const r of ranges){
+  // метки падения пули под текущий боеприпас и кратность — в цвет типа.
+  // Сюда доходит только винтовка: лук вышел выше, у него своя марка
+  for(const r of HUD_RNG_RIFLE){
     const drop = HUD_drop(a, r);
     const y = 50 + f*Math.tan(Math.atan(drop/r))*k;
     if(y>96.5) break;
     if(y<52.5) continue;
     const half = (r%100===0) ? 4.2 : 2.6;
     s += HUD_ln(50-half,y,50+half,y, 0.55, col);
-    // у лука шкала вдвое короче, и подписана каждая метка: неподписанных
-    // ориентиров на такой дуге не хватает
-    if(bow || r%50===0) s += HUD_tx(50+half+1.4, y+0.9, 2.6, tint, r);
+    if(r%50===0) s += HUD_tx(50+half+1.4, y+0.9, 2.6, tint, r);
   }
 
   // центральная точка: цвет заряженного типа, чтобы не искать глазами пояс

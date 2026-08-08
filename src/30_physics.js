@@ -19,6 +19,31 @@ class Box {
 }
 const BOXES = [];
 
+/* ------------------------- БАРЬЕРЫ БАЗ -------------------------
+   Заказчик просит, чтобы на чужую базу нельзя было зайти. Обычной коробкой
+   это не решается: она непроходима для всех, включая хозяев.
+
+   Барьер — та же OBB, но со стороной: сущность своей команды проходит сквозь
+   него, чужая упирается. Команда сущности берётся из e.team; у кого поля нет
+   (частицы, служебные пробы) — барьер игнорируется, иначе мы бы молча начали
+   ловить всё подряд.
+
+   ВАЖНО: барьер держит ТОЛЬКО перемещение. Пули и стрелы сквозь него летят —
+   он не входит в BOXES, а значит и в rayBoxes. Иначе защищённая база
+   превратилась бы в укрытие, из которого безнаказанно стреляют. */
+const BARRIERS = [];
+function addBarrier(x, yBottom, z, sx, sy, sz, yaw, team){
+  const b = new Box(x, yBottom + sy/2, z, sx, sy, sz, yaw||0);
+  b.team = (team|0) === 1 ? 1 : 0;
+  BARRIERS.push(b);
+  return b;
+}
+/* Действует ли барьер на эту сущность: только если у неё есть сторона и она
+   чужая. Вынесено отдельно, потому что спрашивают в двух местах. */
+function barrierBlocks(e, b){
+  return e.team !== undefined && e.team !== null && (e.team|0) !== b.team;
+}
+
 function addBoxMesh(x,yBottom,z,sx,sy,sz,mat,yaw,solid,noShadow){
   const m = new THREE.Mesh(new THREE.BoxGeometry(sx,sy,sz), mat);
   m.position.set(x, yBottom+sy/2, z);
@@ -218,6 +243,25 @@ function moveHoriz(e, dt){
     let nx = e.pos.x-ox, nz = e.pos.z-oz;
     const l = Math.hypot(nx,nz);
     if(l>1e-6){ nx/=l; nz/=l; const dp = e.vel.x*nx + e.vel.z*nz; if(dp<0){ e.vel.x -= nx*dp; e.vel.z -= nz*dp; } }
+  }
+  /* Барьеры баз — тем же выталкиванием, но только для чужих. Отдельным
+     проходом, а не в общем цикле: у барьера нет ступеньки, на него нельзя
+     забраться, и уступ он давать не должен ни при каких условиях. */
+  for(let i=0;i<BARRIERS.length;i++){
+    const b = BARRIERS[i];
+    if(!barrierBlocks(e, b)) continue;
+    if(b.top <= feet + 0.02 || b.bot >= head) continue;
+    if(e.pos.x < b.aMin.x-1 || e.pos.x > b.aMax.x+1 || e.pos.z < b.aMin.z-1 || e.pos.z > b.aMax.z+1) continue;
+    let lx = b.lx(e.pos.x, e.pos.z), lz = b.lz(e.pos.x, e.pos.z);
+    const ex = b.hx + CFG.radius, ez = b.hz + CFG.radius;
+    if(Math.abs(lx) >= ex || Math.abs(lz) >= ez) continue;
+    const px = ex - Math.abs(lx), pz = ez - Math.abs(lz);
+    const ox = e.pos.x, oz = e.pos.z;
+    if(px < pz) lx += (lx<0?-1:1)*px; else lz += (lz<0?-1:1)*pz;
+    e.pos.x = b.wx(lx,lz); e.pos.z = b.wz(lx,lz);
+    let nx = e.pos.x-ox, nz = e.pos.z-oz;
+    const l2 = Math.hypot(nx,nz);
+    if(l2>1e-6){ nx/=l2; nz/=l2; const dp = e.vel.x*nx + e.vel.z*nz; if(dp<0){ e.vel.x -= nx*dp; e.vel.z -= nz*dp; } }
   }
 }
 /* e.noGrav === true — вертикалью рулит вызывающий (лестница, трос, подтягивание):
