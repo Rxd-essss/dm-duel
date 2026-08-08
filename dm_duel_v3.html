@@ -5414,16 +5414,22 @@ function mkWard(x, y0, z, len, h, yaw, col){
   }
   // полотно: маска 'runeglow' — тёмная везде, кроме резьбы, поэтому в
   // аддитивном режиме светятся только руны, а вид сквозь створ не мутнеет
+  /* Полотно намеренно ЕЛЕ ЗАМЕТНОЕ. Первая версия светила в треть силы, и на
+     полотне 47 x 20 м это давало ровно то, на что пожаловался заказчик: в
+     оптику с полем зрения 22° завеса занимает пол-экрана и читается «большим
+     синим кубом», а не полем. Барьер обязан обозначать себя вблизи, когда в
+     него упираешься, а не закрывать полкарты в прицеле. */
   const vm = new THREE.MeshBasicMaterial({
     map: TEX.get('runeglow', PROP_rep(len/5.5), PROP_rep(h/5.5)), color: col,
-    transparent:true, opacity:0.30, blending:THREE.AdditiveBlending,
+    transparent:true, opacity:0.085, blending:THREE.AdditiveBlending,
     depthWrite:false, side:THREE.DoubleSide });
   const v = new THREE.Mesh(new THREE.PlaneGeometry(len-0.6, h-0.4), vm);
   v.position.set(x, y0 + h/2, z); v.rotation.y = yaw;
   v.frustumCulled = false;
   world.add(v);
-  const lh = LIGHTS.addStatic(V(x, y0 + h*0.22, z), col, 0.8, 15);
-  PROP_WARDS.push({ mat:vm, lh, ph:rnd(0,6.283), base:0.8, op:0.30 });
+  // и светит она тоже вполсилы: это метка створа, а не источник освещения зала
+  const lh = LIGHTS.addStatic(V(x, y0 + h*0.22, z), col, 0.34, 11);
+  PROP_WARDS.push({ mat:vm, lh, ph:rnd(0,6.283), base:0.34, op:0.085 });
   return v;
 }
 
