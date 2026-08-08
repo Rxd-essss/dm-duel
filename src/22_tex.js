@@ -222,6 +222,19 @@ const TX_GEN = {
     TX_speck(g,S,ink,90,0.5,1.6,0.62,0.9,0.3);
   },
 
+  /* Те же доски, но ПОПЕРЁК: стены зала «Лесопилки» обшиты вертикальной
+     доской (см. референс §10.0), а 'plank' кладёт доску вдоль U. Развернуть
+     UV на самой геометрии нельзя: одна и та же стена служит и обшивкой, и
+     основанием для настила, и повтор считается из её габаритов.
+     Поворот холста на 90° бесшовности не ломает — плитка это тор, а поворот
+     на прямой угол переводит тор сам в себя. */
+  vplank(g,S){
+    g.save();
+    g.translate(S, 0); g.rotate(Math.PI/2);
+    TX_GEN.plank(g, S);
+    g.restore();
+  },
+
   /* цельный брус: стойки, столбы, приклад. Волокно вдоль V */
   wood(g,S){
     const ink = TX_ink(1.00, 0.935, 0.855);
@@ -567,6 +580,41 @@ const TX_GEN = {
   rune(g,S){ TX_runeStone(g,S,false); },
   runeglow(g,S){ TX_runeStone(g,S,true); },
 
+  /* Руны, ВРЕЗАННЫЕ В БРУС. MAPDESIGN §10.6 требует, чтобы магия встраивалась
+     в дерево, а не спорила с ним: на несущих балках зала слабо светится
+     резьба, и балка при этом остаётся деревянной. Через 'rune' этого не
+     сделать — там камень, и брус с каменной картой читается колонной.
+     Пользоваться так же: toonT(PAL.woodDk,'runewood',rx,ry,{emissive:…,
+     emissiveMap:true}) — маска 'runewoodglow' подставится сама. */
+  runewood(g,S){ TX_runeBeam(g,S,false); },
+  runewoodglow(g,S){ TX_runeBeam(g,S,true); },
+
+  /* Решётчатый настил: площадки над шахтой. Не прозрачный — сквозной настил
+     потребовал бы alphaTest, а это отдельная ветка сортировки и лишний
+     материал; рисунок решётки с провалами в чёрное читается сверху так же,
+     а снизу площадка и должна быть тёмной. */
+  grate(g,S){
+    const ink = TX_ink(0.95, 0.97, 1.0);
+    TX_srand(2903);
+    g.fillStyle = ink(0.10); g.fillRect(0,0,S,S);      // провал между прутьями
+    const step = S/8;                                   // 8 делит 256 нацело
+    for(let i=0;i<8;i++){
+      const p = i*step;
+      // прут: тёмное основание, светлая фаска сверху-слева
+      g.fillStyle = ink(0.52); g.fillRect(p, 0, step*0.34, S);
+      g.fillStyle = ink(0.52); g.fillRect(0, p, S, step*0.34);
+      g.fillStyle = ink(0.86,0.7); g.fillRect(p, 0, step*0.12, S);
+      g.fillStyle = ink(0.86,0.7); g.fillRect(0, p, S, step*0.12);
+      g.fillStyle = ink(0.30,0.6); g.fillRect(p+step*0.28, 0, step*0.08, S);
+      g.fillStyle = ink(0.30,0.6); g.fillRect(0, p+step*0.28, S, step*0.08);
+    }
+    TX_speck(g,S,ink,160,0.5,1.8,0.35,0.80,0.4);       // грязь и задиры
+    for(let i=0;i<8;i++){
+      const a = TX_rr(-0.3,0.3), l = TX_rr(20,60);
+      TX_hair(g,S,TX_rr(0,S),TX_rr(0,S), Math.cos(a)*l, Math.sin(a)*l, TX_rr(1,2.4), ink(TX_rr(1.0,1.15), 0.35));
+    }
+  },
+
   /* Трава: терраин и склоны.
      Главная работа этой карты — не «зерно», а КРУПНЫЙ ТОН. 25_terrain.js
      нормирует детальную карту по её собственному среднему, поэтому общий
@@ -649,6 +697,43 @@ const TX_GEN = {
   }
 };
 
+/* Брус с врезанными рунами и его маска свечения. Как и у камня, база и маска
+   рисуются одним кодом с одного зерна — иначе свечение съедет с резьбы.
+   Глифы выстроены столбиком по центру бруса: балка длинная и узкая, а руны,
+   разбросанные как по камню, на ней складываются в мусор. */
+function TX_runeBeam(g,S,glow){
+  const ink = TX_ink(0.96, 0.99, 1.0);
+  if(glow){
+    g.fillStyle = '#000'; g.fillRect(0,0,S,S);
+  } else {
+    g.save(); TX_GEN.wood(g,S); g.restore();
+  }
+  TX_srand(2311);
+  const n = 3, step = S/n;
+  for(let i=0;i<n;i++){
+    const cx = S*0.5 + TX_rr(-5,5), cy = i*step + step*0.5, sc = step*0.26;
+    const gl = TX_GLYPH[TX_ri(0, TX_GLYPH.length-1)];
+    TX_wrap(S,cx,cy,sc*1.8,(px,py)=>{
+      const stroke = (style,w,blur)=>{
+        g.strokeStyle = style; g.lineWidth = w; g.lineCap='round'; g.lineJoin='round';
+        g.shadowBlur = blur||0; g.shadowColor = 'rgba(150,235,255,0.9)';
+        g.beginPath();
+        for(const seg of gl){ g.moveTo(px+seg[0]*sc, py+seg[1]*sc); g.lineTo(px+seg[2]*sc, py+seg[3]*sc); }
+        g.stroke();
+        g.shadowBlur = 0;
+      };
+      g.save();
+      // на дереве жёлоб делаем мягче, чем на камне: долото по волокну не рвёт
+      if(!glow) stroke(ink(0.24,0.9), sc*0.22, 0);
+      g.globalCompositeOperation = 'lighter';
+      stroke(glow ? 'rgba(58,132,176,0.5)' : ink(0.5,0.26), sc*0.30, sc*0.7);
+      stroke(glow ? 'rgba(196,246,255,0.92)' : 'rgba(200,244,255,0.72)', sc*0.10, sc*0.32);
+      g.restore();
+    });
+  }
+  g.shadowBlur = 0;
+}
+
 /* Камень и его маска свечения рисуются одним кодом: раскладка глифов должна
    совпадать до пикселя, иначе emissiveMap «поедет» относительно резьбы. */
 function TX_runeStone(g,S,glow){
@@ -708,6 +793,8 @@ function TX_runeStone(g,S,glow){
    25_terrain.js, поэтому lvl на неё не влияет вовсе — только con. */
 const TX_TONE = {
   plank: { lvl:0.60, con:1.30 },
+  vplank:{ lvl:0.60, con:1.30 },   // та же доска, только поперёк — и тон тот же
+  grate: { lvl:0.70, con:1.20 },
   wood:  { lvl:0.73, con:1.20 },
   metal: { lvl:0.68, con:1.25 },
   plate: { lvl:0.63, con:1.30 },
@@ -751,7 +838,12 @@ const TEX = {
   size: 256,           // потолок по контракту; больше — впустую и по памяти, и по генерации
   _cv: new Map(),      // холсты по имени: рисуем один раз
   _t: new Map(),       // готовые текстуры по имени+повтору
-  list: ['plank','wood','metal','plate','rust','conc','stone','sand','cloth','roof','crate','rune','runeglow','grass','dirt'],
+  /* Обязательный набор §3.2 плюс четыре карты под деревянный зал §10:
+     'vplank'   — та же доска, но вертикальная (обшивка стен по референсу);
+     'grate'    — решётчатый настил над шахтой;
+     'runewood' — брус с врезанными светящимися рунами (+ маска 'runewoodglow'). */
+  list: ['plank','vplank','wood','metal','plate','rust','conc','stone','sand','cloth','roof','crate',
+         'grate','rune','runeglow','runewood','runewoodglow','grass','dirt'],
 
   canvas(name){
     let c = this._cv.get(name);

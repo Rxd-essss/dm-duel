@@ -20,7 +20,7 @@
   }
 
   /* ---------- §7.1 канонические высоты ---------- */
-  const LV = [null, CFG.floor1, CFG.floor2];
+  const LV = [null, CFG.floor1, CFG.floor2, CFG.floor3];
   const offLevel = [];
   for (const p of POSTS) {
     if (!p.level) continue;                       // этаж 0 — по рельефу
@@ -32,10 +32,10 @@
   if (offLevel.length) bad('§7.1 позиции вне канонических высот: ' + offLevel.length, offLevel.slice(0, 8));
 
   /* ---------- §7.2 заполненность этажей ---------- */
-  const byLv = { 0: [], 1: [], 2: [] };
+  const byLv = { 0: [], 1: [], 2: [], 3: [] };
   for (const p of POSTS) (byLv[p.level | 0] || (byLv[p.level | 0] = [])).push(p);
   R.info.поЭтажам = { 0: (byLv[0] || []).length, 1: (byLv[1] || []).length, 2: (byLv[2] || []).length };
-  for (const lv of [0, 1, 2]) {
+  for (const lv of [0, 1, 2, 3]) {
     const a = byLv[lv] || [];
     if (a.length < 12) bad('§7.2 на этаже ' + lv + ' меньше 12 позиций', a.length);
     const south = a.filter(p => p.z < 0).length, north = a.length - south;
@@ -51,10 +51,10 @@
   R.info.переходов = links.length;
   if (!links.length) { bad('§7.3 не найдено ни одного перехода (RAMPS и CLIMBS пусты)'); }
 
-  const farthest = { 1: 0, 2: 0 };
+  const farthest = { 1: 0, 2: 0, 3: 0 };
   const badLink = [];
-  for (const lv of [1, 2]) {
-    const limit = lv === 1 ? 25 : 20;
+  for (const lv of [1, 2, 3]) {
+    const limit = 22;   // §10.5: с любой точки яруса до спуска не больше 22 м
     for (const p of byLv[lv] || []) {
       let best = 1e9;
       for (const l of links) {
@@ -67,7 +67,7 @@
       if (best > limit) badLink.push({ name: p.name, level: lv, дистанция: +best.toFixed(1), лимит: limit });
     }
   }
-  R.info.дальшеВсегоДоПерехода = { этаж1: +farthest[1].toFixed(1), этаж2: +farthest[2].toFixed(1) };
+  R.info.дальшеВсегоДоПерехода = { ярус1: +farthest[1].toFixed(1), ярус2: +farthest[2].toFixed(1), ярус3: +farthest[3].toFixed(1) };
   if (badLink.length) bad('§7.3 позиции без близкого перехода вниз: ' + badLink.length, badLink.slice(0, 8));
 
   /* ---------- §7.4 респавны не простреливаются с этажа 2 ----------
@@ -83,7 +83,7 @@
      за спиной. Поэтому спавны помечаем стороной и сверяем со стороной позиции
      (север карты — RED, юг — BLU). */
   const marked = SPAWNS_BLU.map(s => ({ s, team: 0 })).concat(SPAWNS_RED.map(s => ({ s, team: 1 })));
-  for (const p0 of byLv[2] || []) {
+  for (const p0 of (byLv[2] || []).concat(byLv[3] || [])) {
    const pTeam = p0.z > 0 ? 1 : 0;
    for (const off of RING) {
     const p = { x: p0.x + off[0], y: p0.y, z: p0.z + off[1], name: p0.name };
@@ -100,7 +100,7 @@
     }
    }
   }
-  if (exposed.length) bad('§7.4 респавны простреливаются с этажа 2: ' + exposed.length, exposed.slice(0, 6));
+  if (exposed.length) bad('§7.4 респавны простреливаются с верхних ярусов: ' + exposed.length, exposed.slice(0, 6));
 
   /* ---------- над позицией должно быть место встать ----------
      Позиция внутри стога или обломка выглядит рабочей в списке, но бот в ней
@@ -212,6 +212,71 @@
   R.info.бюджет = { мешей: meshes, треугольников: tris };
   if (meshes > 700) bad('§7.6 мешей больше 700', meshes);
   if (tris > 220000) bad('§7.6 треугольников больше 220 тыс.', tris);
+
+  /* ---------- §10.2 ДИСТАНЦИЯ: ради неё карта и переделывалась ----------
+     Снайперская игра держится на том, что до цели далеко и поправку надо брать.
+     Если бой идёт на 30 м, падение пули неразличимо и вся баллистика — украшение. */
+  const bs = SPAWNS_BLU[0], rs = SPAWNS_RED[0];
+  const baseToBase = Math.hypot(bs.x - rs.x, bs.z - rs.z);
+  R.info.торецДоТорца = +baseToBase.toFixed(0);
+  if (baseToBase < 120) bad('§10.3 торец до торца меньше 120 м', +baseToBase.toFixed(0));
+
+  const south = POSTS.filter(p => p.z < 0), north = POSTS.filter(p => p.z > 0);
+  const cross = [];
+  for (const a of south) for (const b of north) cross.push(Math.hypot(a.x - b.x, a.z - b.z));
+  cross.sort((u, v) => u - v);
+  const med = cross.length ? cross[cross.length >> 1] : 0;
+  R.info.медианаМеждуПоловинами = +med.toFixed(0);
+  if (med < 55) bad('§10.3 медиана между позициями половин меньше 55 м', +med.toFixed(0));
+
+  /* Чистые линии огня: сколько пар позиций реально видят друг друга далеко. */
+  let longLines = 0, longest = 0;
+  for (const a of south) for (const b of north) {
+    const d = Math.hypot(a.x - b.x, a.z - b.z);
+    if (d < 100) continue;
+    _a.set(a.x, a.y + 1.6, a.z); _b.set(b.x, b.y + 1.6, b.z);
+    if (losClear(_a, _b)) { longLines++; if (d > longest) longest = d; }
+  }
+  R.info.чистыхЛинийОт100 = longLines;
+  R.info.самаяДлиннаяЛиния = +longest.toFixed(0);
+  if (longLines < 8) bad('§10.3 чистых линий огня ≥100 м меньше восьми', longLines);
+
+  /* Падение пули на предельной линии — честной интеграцией той же баллистики,
+     что и в бою. Если падение меньше 0.7 м, поправку брать не нужно. */
+  if (longest > 0) {
+    const am = AMMO[0];
+    let vx = am.v, y = 0, t = 0, x = 0;
+    let vy = 0;
+    const g = CFG.bulletG * am.gMul, h = 1 / 240;
+    while (x < longest && t < 6) {
+      vy -= g * h;
+      const sp = Math.sqrt(vx * vx + vy * vy);
+      const k = Math.max(0.2, 1 - am.drag * h);
+      vx *= k; vy *= k;
+      x += vx * h; y += vy * h; t += h;
+    }
+    R.info.падениеПули = { дистанция: +longest.toFixed(0), метров: +(-y).toFixed(2), времяПолёта: +t.toFixed(2) };
+    if (-y < 0.7) bad('§10.3 падение пули на предельной линии меньше 0.7 м', +(-y).toFixed(2));
+  }
+
+  /* ---------- §10.3 ОТКРЫТОСТЬ ----------
+     Доля свободных длинных линий между случайными открытыми точками поля.
+     Это и есть численное выражение «долина, а не свалка». */
+  let pairs = 0, clear = 0;
+  let sd = 20250729;
+  const rnd2 = () => { sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0; return sd / 4294967296; };
+  for (let i = 0; i < 400; i++) {
+    const ax = (rnd2() * 2 - 1) * 70, az = (rnd2() * 2 - 1) * 70;
+    const bx = (rnd2() * 2 - 1) * 70, bz = (rnd2() * 2 - 1) * 70;
+    if (Math.hypot(ax - bx, az - bz) < 100) continue;
+    pairs++;
+    _a.set(ax, terrainH(ax, az) + 1.6, az);
+    _b.set(bx, terrainH(bx, bz) + 1.6, bz);
+    if (losClear(_a, _b)) clear++;
+  }
+  const openPct = pairs ? clear / pairs * 100 : 0;
+  R.info.открытость = { парПроверено: pairs, 'чистыхЛинийОт100м%': +openPct.toFixed(1) };
+  if (openPct < 8) warn('§10.3 свободных длинных линий мало даже для зала', +openPct.toFixed(1));
 
   /* ---------- сводка по геометрии переходов ---------- */
   R.info.геометрия = {
