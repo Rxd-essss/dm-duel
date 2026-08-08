@@ -34,7 +34,22 @@
   <div id="stam"><div id="stamFill"></div></div>
   <div id="dash" class="ready"><div class="cap">РЫВОК</div><div id="dashFill"></div></div>
 
+  <!-- НАТЯГ ЛУКА. Стоит под маркой, а не в левой колонке ресурсов: у лука это
+       не фоновый запас вроде дыхания, а то самое значение, ради которого игрок
+       держит ЛКМ и смотрит в центр экрана. Пока не тянут — блока нет вовсе,
+       чтобы не засорять рабочую зону. Заполнение ведёт setDrawHUD(). -->
+  <div id="drawWrap"><div class="bar"><div id="drawFill"></div></div><div class="cap" id="drawCap">НАТЯГ</div></div>
+
   <div id="xh" class="a1"><div class="h" id="xhU"></div><div class="h" id="xhD"></div><div class="v" id="xhL"></div><div class="v" id="xhR"></div><div class="dot"></div></div>
+  <!-- МАРКА ЛУКА. Крест винтовки здесь врёт дважды: стрела приходит в точку
+       НИЖЕ центра (дуга) и тем кучнее, чем сильнее натянут лук. Поэтому кольцо
+       сжимается по натягу, а метки под центром — реальная просадка на 40/70/100 м,
+       пересчитанная под текущий тип стрелы (HUD_bowMarks в 80_hud.js). -->
+  <div id="xhBow" class="a1">
+    <div class="ring" id="xhRing"></div>
+    <div class="hold" id="xhHold"><i><b></b></i><i><b></b></i><i><b></b></i></div>
+    <div class="dot"></div>
+  </div>
   <div id="aimZone"><div id="aimOut"></div><div id="aimIn"></div><div id="aimCap"></div></div>
   <div id="hitmark"><i></i><i></i></div>
   <div id="dirs"></div>
@@ -80,29 +95,38 @@
     <div class="head">
       <h1>DM_<span>DUEL</span> v3</h1>
       <div class="sub">ДУЭЛЬ СНАЙПЕРОВ &nbsp;•&nbsp; КАРТА «ОСАДА» &nbsp;•&nbsp; ЗАМОК RED ПРОТИВ ЛАГЕРЯ BLU</div>
+      <!-- Полный экран — не украшение: в окне браузера дуэль теряет и обзор, и
+           точность мыши. Кнопок две (здесь и в паузе), поэтому общий класс
+           .fsbtn, а id 'fsBtn' — на главной: по нему подпись синхронизирует
+           90_game.js. Подписи ведут оба синхронизатора, текст один и тот же. -->
+      <button type="button" class="btn sm fsbtn" id="fsBtn">ВО ВЕСЬ ЭКРАН</button>
     </div>
     <div class="body">
       <div>
-        <h2 class="sec">Боекомплект</h2>
-        <div class="ammoCard a1"><div class="n" style="color:var(--a1)">1 · МАТЧЕВЫЙ<em>БЕЗ ОТКАТА</em></div>
-          <div class="d">Скорость, малое падение и снос. <b>Единственный с полным критом в голову</b>.</div>
+        <!-- Боекомплект принадлежит стволу, а не брифингу: три карточки ниже
+             заполняет HUD из WPNS[game.weapon].ammo. Вписывать сюда матчевый и
+             фугасный литералами значило бы врать всякий раз, когда выбран лук. -->
+        <h2 class="sec" id="ammoSec">Боекомплект</h2>
+        <div class="ammoCard a1"><div class="n" style="color:var(--a1)"><span id="an0">1 · МАТЧЕВЫЙ</span><em id="ae0">БЕЗ ОТКАТА</em></div>
+          <div class="d" id="ad0"></div>
           <div class="stat" id="s1"></div></div>
-        <div class="ammoCard a2"><div class="n" style="color:var(--a2)">2 · ФУГАСНЫЙ<em>ОТКАТ 2.5 С</em></div>
-          <div class="d">Подрыв площадью, <b>крита нет вообще</b>: максимум в эпицентре, за укрытием
-            вдвое меньше. Тяжёлая пуля проседает — берите выше.</div>
+        <div class="ammoCard a2"><div class="n" style="color:var(--a2)"><span id="an1">2 · ФУГАСНЫЙ</span><em id="ae1">ОТКАТ 2.5 С</em></div>
+          <div class="d" id="ad1"></div>
           <div class="stat" id="s2"></div></div>
-        <div class="ammoCard a3"><div class="n" style="color:var(--a3)">3 · ЗАЖИГАТЕЛЬНЫЙ<em>ОТКАТ 5 С</em></div>
-          <div class="d">Прямой урон слабый, но цель <b>горит</b> и за углом. Промах оставляет очаг
-            на подходе. Откат пять секунд — следите за слотом.</div>
+        <div class="ammoCard a3"><div class="n" style="color:var(--a3)"><span id="an2">3 · ЗАЖИГАТЕЛЬНЫЙ</span><em id="ae2">ОТКАТ 5 С</em></div>
+          <div class="d" id="ad2"></div>
           <div class="stat" id="s3"></div></div>
 
-        <h2 class="sec" style="margin-top:14px">Правила боя</h2>
+        <!-- Баллистика стоит под карточками боеприпаса, а не в колонке
+             раскладки: это продолжение разговора про то, чем стреляешь. -->
+        <h2 class="sec s2">Баллистика и откаты</h2>
         <div class="rows">
-          <div class="row"><span>Фугасный урон</span><b>без крита, спад от центра</b></div>
-          <div class="row"><span>Урон по корпусу</span><b>растёт с зарядом</b></div>
-          <div class="row"><span>Стрельба без оптики</span><b>большой разброс</b></div>
-          <div class="row"><span>Противник целится</span><b style="color:var(--bad)">луч + блик оптики</b></div>
-          <div class="row"><span>Чужие работают отрядом</span><b style="color:var(--bad)">обход, ярусы, подавление</b></div>
+          <div class="row"><span id="balDropK">Пуля летит по дуге</span><b id="balDropV">время полёта + падение</b></div>
+          <div class="row"><span id="balRetK">Метки сетки оптики</span><b id="balRetV">50 … 300 м, шаг 50</b></div>
+          <div class="row" id="rowRange"><span>Дальномер по центру</span><b>в оптике</b></div>
+          <div class="row"><span>Боковой ветер</span><b id="balWindV">случайный на бой</b></div>
+          <div class="row"><span>Откат по каждому типу</span><b>тикает и у не выбранных</b></div>
+          <div class="row"><span>Тип на откате</span><b style="color:var(--a3)">слот погашен, выстрела нет</b></div>
         </div>
       </div>
       <div>
@@ -115,26 +139,63 @@
           <div class="row"><span>Подтянуться на уступ</span><b><kbd>Space</kbd> у стены</b></div>
           <div class="row"><span>Магический рывок</span><b class="arc"><kbd>Q</kbd></b></div>
           <div class="row"><span>Лестница / трос</span><b><kbd>W</kbd> в зоне, <kbd>Space</kbd> — спрыгнуть</b></div>
-          <div class="row"><span>Выстрел</span><b>ЛКМ</b></div>
-          <div class="row"><span>Оптика</span><b>ПКМ</b></div>
-          <div class="row"><span>Кратность</span><b>колесо в оптике</b></div>
-          <div class="row"><span>Задержать дыхание</span><b><kbd>Shift</kbd> в оптике</b></div>
-          <div class="row"><span>Тип патрона</span><b><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> / колесо вне оптики</b></div>
+          <!-- Строки, зависящие от ствола, ведёт HUD: у лука нет ни оптики, ни
+               кратности, ни задержки дыхания, зато ЛКМ работает иначе. Гасим
+               неприменимое классом .off, а не прячем: игрок должен видеть, что
+               механика существует и чем он за неё заплатил, выбрав лук. -->
+          <div class="row"><span>Выстрел</span><b id="ctlFire">ЛКМ</b></div>
+          <div class="row" id="rowDraw"><span>Натяг лука</span><b class="arc">держать ЛКМ, отпустить — выстрел</b></div>
+          <div class="row" id="rowScope"><span>Оптика</span><b id="ctlScopeV">ПКМ</b></div>
+          <div class="row" id="rowZoom"><span>Кратность</span><b>колесо в оптике</b></div>
+          <div class="row" id="rowHold"><span>Задержать дыхание</span><b><kbd>Shift</kbd> в оптике</b></div>
+          <div class="row"><span id="ctlAmmoK">Тип патрона</span><b><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> / колесо вне оптики</b></div>
           <div class="row"><span>Перезарядка</span><b><kbd>R</kbd></b></div>
+          <div class="row"><span>Полный экран</span><b><kbd>F</kbd></b></div>
           <div class="row"><span>Пауза</span><b><kbd>Esc</kbd></b></div>
         </div>
-        <h2 class="sec" style="margin-top:14px">Баллистика и откаты</h2>
+        <!-- Подвижность и правила боя стоят в колонке раскладки: это тоже
+             справка о том, что делают руки. Колонки брифинга тянутся до самой
+             длинной, а выбор оружия занял место в третьей. -->
+        <h2 class="sec s2">Подвижность</h2>
         <div class="rows">
-          <div class="row"><span>Пуля летит по дуге</span><b>время полёта + падение</b></div>
-          <div class="row"><span>Метки сетки оптики</span><b>50 … 300 м, шаг 50</b></div>
-          <div class="row"><span>Дальномер по центру</span><b>в оптике</b></div>
-          <div class="row"><span>Боковой ветер</span><b>случайный на бой</b></div>
-          <div class="row"><span>Откат по каждому типу</span><b>тикает и у не выбранных</b></div>
-          <div class="row"><span>Тип на откате</span><b style="color:var(--a3)">слот погашен, выстрела нет</b></div>
+          <div class="row"><span>Подтягивание</span><b>уступ до 2 м берётся сам</b></div>
+          <div class="row"><span>Доп. прыжок</span><b class="arc">эфирный толчок в воздухе</b></div>
+          <div class="row"><span>Рывок <kbd>Q</kbd></span><b class="arc">шкала под дыханием</b></div>
+          <div class="row"><span>Сорваться с края</span><b>прыжок ещё засчитывается</b></div>
+        </div>
+
+        <h2 class="sec s2">Правила боя</h2>
+        <div class="rows">
+          <div class="row"><span>Урон площадью</span><b>без крита, спад от центра</b></div>
+          <div class="row"><span>Урон по корпусу</span><b id="ruleChargeV">растёт с зарядом</b></div>
+          <div class="row"><span id="ruleAimK">Стрельба без оптики</span><b id="ruleAimV">большой разброс</b></div>
+          <div class="row"><span>Противник целится</span><b style="color:var(--bad)">луч + блик оптики</b></div>
+          <div class="row"><span>Чужие работают отрядом</span><b style="color:var(--bad)">обход, ярусы, подавление</b></div>
         </div>
       </div>
       <div>
-        <!-- Сторона стоит первой и вплотную к сложности: это два решения,
+        <!-- ОРУЖИЕ. Первое из трёх решений перед боем и самое крупное: ствол
+             меняет не цифры, а способ целиться. Винтовка бьёт почти прямо и
+             смотрит в оптику; лук вынуждает брать выше цели и тянуть тетиву.
+             Характер каждого берём из WPNS[i].hint — второй экземпляр этого
+             текста в разметке однажды разойдётся с оружием. Выбор ложится в
+             game.weapon, запоминается и подменяет карточки боекомплекта. -->
+        <h2 class="sec">Оружие</h2>
+        <div id="wpnSel">
+          <button type="button" class="wm w0 on" data-w="0">
+            <span class="tn" id="wn0">ВИНТОВКА</span>
+            <span class="tg" id="wt0"></span>
+            <span class="td" id="wd0"></span>
+          </button>
+          <button type="button" class="wm w1" data-w="1">
+            <span class="tn" id="wn1">ЛУК</span>
+            <span class="tg" id="wt1"></span>
+            <span class="td" id="wd1"></span>
+          </button>
+        </div>
+        <div id="wpnHint"></div>
+
+        <!-- Сторона стоит вплотную к оружию и сложности: это три решения,
              которые игрок принимает перед самым нажатием «В БОЙ».
              Стороны на «Осаде» устроены по-разному, поэтому выбор здесь про
              рисунок боя, а не про цвет: он ложится в game.team и запоминается.
@@ -153,7 +214,7 @@
         </div>
         <div id="teamNet" class="hide"></div>
 
-        <h2 class="sec" style="margin-top:14px">Сложность</h2>
+        <h2 class="sec s2">Сложность</h2>
         <div class="seg" id="diffSeg">
           <button data-d="easy">НОВОБРАНЕЦ</button>
           <button data-d="normal" class="on">СНАЙПЕР</button>
@@ -163,10 +224,9 @@
 
         <!-- Карта. Коротко и только то, по чему игрок ориентируется в бою:
              три канонические высоты (MAPDESIGN §1), кто где стоит и чем
-             переходят с этажа на этаж. Стоит сразу под выбором стороны —
-             читается как продолжение того же решения. Числа высот подставляет
-             HUD из CFG: дублировать их текстом значит однажды разойтись с картой. -->
-        <h2 class="sec" style="margin-top:14px">Карта «Осада»</h2>
+             переходят с этажа на этаж. Числа высот подставляет HUD из CFG:
+             дублировать их текстом значит однажды разойтись с картой. -->
+        <h2 class="sec s2">Карта «Осада»</h2>
         <div class="rows">
           <div class="row"><span>Этаж 0 · земля</span><b>двор, лагерь, улочки посада</b></div>
           <div class="row"><span>Этаж 1 · боевой ход</span><b><span id="mapF1">7.5</span> м — камень и настилы</b></div>
@@ -175,14 +235,6 @@
           <div class="row"><span>Юг</span><b style="color:#8fc0dd">лагерь BLU: помосты, башня</b></div>
           <div class="row"><span>Центр</span><b>посад: руины, обелиск, мосты</b></div>
           <div class="row"><span>Наверх и вниз</span><b class="arc">рампы, лестницы, тросы</b></div>
-        </div>
-
-        <h2 class="sec" style="margin-top:14px">Подвижность</h2>
-        <div class="rows">
-          <div class="row"><span>Подтягивание</span><b>уступ до 2 м берётся сам</b></div>
-          <div class="row"><span>Доп. прыжок</span><b class="arc">эфирный толчок в воздухе</b></div>
-          <div class="row"><span>Рывок <kbd>Q</kbd></span><b class="arc">шкала под дыханием</b></div>
-          <div class="row"><span>Сорваться с края</span><b>прыжок ещё засчитывается</b></div>
         </div>
       </div>
     </div>
@@ -207,7 +259,7 @@
           <span class="nfair">Попадания засчитывает стреляющий, сервер проверяет заявки — игра с друзьями, не античит.</span>
         </div>
       </div>
-      <span class="hint">Клик по экрану захватывает мышь. <kbd>Esc</kbd> — пауза и настройки.</span>
+      <span class="hint">Клик по экрану захватывает мышь. <kbd>Esc</kbd> — пауза и настройки.<span class="fsHint"> <kbd>F</kbd> — во весь экран.</span></span>
     </div>
   </div>
 </div>
@@ -238,7 +290,11 @@
 <!-- ================= ПАУЗА ================= -->
 <div id="pause" class="screen hide">
   <div class="card panel" style="width:min(560px,96vw)">
-    <div class="head"><h1 style="font-size:30px">ПАУЗА</h1><div class="sub">DM_DUEL v3</div></div>
+    <!-- Вторая кнопка полного экрана: из паузы в него выходят чаще всего, а
+         возвращаться в брифинг ради одного нажатия глупо. Id здесь нет
+         намеренно — он один на страницу и стоит на кнопке брифинга. -->
+    <div class="head"><h1 style="font-size:30px">ПАУЗА</h1><div class="sub">DM_DUEL v3</div>
+      <button type="button" class="btn sm fsbtn">ВО ВЕСЬ ЭКРАН</button></div>
     <div class="body" style="grid-template-columns:1fr">
       <div>
         <h2 class="sec">Настройки</h2>
@@ -246,16 +302,18 @@
         <div class="opt"><span style="width:150px">Обзор (FOV)</span><input type="range" id="optFov" min="65" max="105" value="80"><span class="v" id="vFov">80</span></div>
         <div class="opt"><span style="width:150px">Громкость</span><input type="range" id="optVol" min="0" max="100" value="70"><span class="v" id="vVol">70</span></div>
         <div class="opt"><span style="width:150px">Тени</span><input type="range" id="optSh" min="0" max="2" value="2"><span class="v" id="vSh">выс</span></div>
-        <h2 class="sec" style="margin-top:14px">Сложность</h2>
+        <h2 class="sec s2">Сложность</h2>
         <div class="seg" id="diffSeg2">
           <button data-d="easy">НОВОБРАНЕЦ</button><button data-d="normal" class="on">СНАЙПЕР</button><button data-d="hard">ЛЕГЕНДА</button>
         </div>
-        <h2 class="sec" style="margin-top:14px">Напоминание</h2>
+        <h2 class="sec s2">Напоминание</h2>
         <div class="rows">
           <div class="row"><span>Подкат</span><b><kbd>Ctrl</kbd> на бегу</b></div>
           <div class="row"><span>Рывок</span><b class="arc"><kbd>Q</kbd></b></div>
           <div class="row"><span>Доп. прыжок / подтягивание</span><b><kbd>Space</kbd></b></div>
           <div class="row"><span>Лестница, трос</span><b><kbd>W</kbd> в зоне</b></div>
+          <div class="row"><span>Ваш ствол</span><b id="pauseWpnV">снайперская винтовка</b></div>
+          <div class="row"><span>Полный экран</span><b><kbd>F</kbd></b></div>
           <div class="row"><span>Табло в сетевом бою</span><b><kbd>Tab</kbd> — удерживать</b></div>
         </div>
       </div>

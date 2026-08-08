@@ -28,18 +28,55 @@ const RULES = { slots:8, players:4, goal:20, respawn:3.0, tick:20, timeout:10000
 
 const VER = 'v3';                     // версия протокола, приходит в hello
 
-/* Боевые числа продублированы из массива AMMO в src/10_core.js.
+/* Боевые числа продублированы из массива RIFLE_AMMO в src/10_core.js.
    ОНИ ОБЯЗАНЫ СОВПАДАТЬ С НИМ. По ним сервер считает потолок урона и
    минимально возможный интервал между выстрелами; разъедутся — сервер начнёт
    резать честные попадания или пропускать нечестные. Поле headMax повторяет
    WPN_headDamage() из src/60_weapon.js: полный крит только у матчевого,
    у фугаса крита нет вовсе, зажигательный бьёт в голову ×2.2. */
-const AMMO = [
+const RIFLE_AMMO = [
   { id:'match', dmgMax:90, headMax:1000,  cd:0.0, bolt:1.10 },
   { id:'frag',  dmgMax:44, headMax:44,    cd:2.5, bolt:1.55, splashR:5.2, splashMax:58 },
   { id:'fire',  dmgMax:38, headMax:83.6,  cd:5.0, bolt:1.30, burnDps:11, burnTime:6 }
 ];
-const BURN_TOTAL = AMMO[2].burnDps * AMMO[2].burnTime;   // 66 — весь запас горения с одного попадания
+
+/* Вторая таблица — стрелы. ОНА ТОЖЕ ОБЯЗАНА СОВПАДАТЬ с BOW_AMMO из
+   src/10_core.js: у лука свои цифры, и проверять его заявки по винтовочным
+   значит либо резать честные выстрелы, либо пропускать чужие.
+   bolt здесь — не затвор, а время наложить стрелу (см. SRV_minInterval).
+
+   headMax у стрелы — 1000, как у матчевого патрона: «обычный» тип у обоих
+   стволов по замыслу единственный с ПОЛНЫМ критом (10_core.js), а у нас нет
+   способа отличить гарантированное убийство от завышенной заявки, кроме как
+   поверить в него. Резать честный крит хуже: заявить 'head' читер может и
+   с винтовкой, этот риск в схеме был и раньше. Огненная бьёт в голову ×2.2
+   (36 × 2.2 = 79.2), у взрывной крита нет вовсе. */
+const BOW_AMMO = [
+  { id:'arrow', dmgMax:88, headMax:1000,  cd:0.0, bolt:0.42 },
+  { id:'bomb',  dmgMax:42, headMax:42,    cd:2.5, bolt:0.62, splashR:5.0, splashMax:56 },
+  { id:'flame', dmgMax:36, headMax:79.2,  cd:5.0, bolt:0.52, burnDps:11, burnTime:6 }
+];
+
+/* Стволы — зеркало WPNS из src/10_core.js. Индекс здесь и есть поле w из
+   'hello' и из записи игрока в снапшоте: 0 винтовка, 1 лук. drawTime — время
+   полного натяга; у винтовки его нет. */
+const WEAPONS = [
+  { id:'rifle', bow:false, drawTime:0,    ammo:RIFLE_AMMO },
+  { id:'bow',   bow:true,  drawTime:1.05, ammo:BOW_AMMO }
+];
+function SRV_w(w){ return (w | 0) === 1 ? 1 : 0; }
+/* Строка боеприпаса ТОГО, ЧЕМ СТРЕЛЯЕТ ЗАЯВИТЕЛЬ (null — такого индекса нет).
+   Всё, что проверяет урон и темп, обязано ходить сюда, а не в одну «главную»
+   таблицу: у лука и винтовки совпадают только роли типов, но не числа. */
+function SRV_ammo(p, a){
+  const L = WEAPONS[p.w].ammo;
+  return (a >= 0 && a < L.length) ? L[a] : null;
+}
+function SRV_burnTotal(w){ const a = WEAPONS[SRV_w(w)].ammo[2]; return a.burnDps * a.burnTime; }
+/* Весь запас горения с одного попадания. Котёл жертвы наполняет ЧУЖОЕ оружие,
+   поэтому его потолок берём по самому щедрому стволу, а темп списания — по
+   тому, которым подожгли (v.burnDps). */
+const BURN_MAX = Math.max(SRV_burnTotal(0), SRV_burnTotal(1));   // 66
 
 /* Допуски валидации. Сеть врёт временем и позициями, поэтому пороги заведомо
    шире идеала: задача — отсечь бессмыслицу, а не наказать за пинг. */
@@ -50,7 +87,9 @@ const V_HITWIN = 3000;    // мс: попадание обязано опира�
 const V_LATERAL0 = 3.5;   // допуск «мимо луча» у ствола, м
 const V_LATERALK = 0.06;  // и его рост с дистанцией (лаг цели: 8.8 м/с × 0.2 с на 20 м — это 5°)
 const V_DMG_TOL  = 1.06;  // округления клиента и множители сложности
-const BOT_MAX_DMG = 190;  // бот бьёт матчевым: 90 × 1.25 (сложность) × 1.65 (крит) ≈ 186
+const BOT_MAX_DMG = 190;  // бот бьёт матчевым: 90 × 1.25 (сложность) × 1.65 (крит) ≈ 186.
+                          // Луков у ботов нет: ИИ стреляет винтовкой независимо от того,
+                          // что выбрал себе хост, — потолок здесь один и не зависит от w
 const BOT_HITS  = 8;      // сколько заявок об уроне ботам засчитываем на один выстрел:
                           // фугас накрывает всех сразу, но не больше, чем их бывает
 const V_PICK2   = 36;     // квадрат допустимого расстояния до пикапа, м². Клиент берёт
@@ -66,6 +105,9 @@ const REJ_MAX   = 100;    // столько отклонений за окно �
                           // заявок физически не больше нескольких в секунду, и он не
                           // должен вылетать из матча за то, что ему не везёт с сетью
 const ROUND_HOLD = 10000; // мс после достижения цели до сброса счёта
+const WPN_SWAP  = 3000;   // мс: не чаще этого смена ствола обнуляет отметки выстрелов.
+                          // Честному игроку столько и так стоит выход в брифинг, а
+                          // «туда-обратно» перестаёт быть способом стрелять без темпа
 
 /* ====================== СЕТЕВЫЕ ЛИМИТЫ ====================== */
 const WS_GUID     = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -91,7 +133,7 @@ const SPAWNS = [
 
 /* ====================== ПИКАПЫ ====================== */
 /* Зеркало массива PICKUPS из src/45_map.js. ТИП, КООРДИНАТЫ И ПОРЯДОК ОБЯЗАНЫ
-   СОВПАДАТЬ С НИМ — так же, как AMMO и точки респавна. Клиент шлёт индекс в
+   СОВПАДАТЬ С НИМ — так же, как таблицы боеприпасов и точки респавна. Клиент шлёт индекс в
    этом массиве, и разъехавшийся порядок означает, что заявка на аптечку у базы
    вылечит того, кто стоит на крыше форта.
 
@@ -129,11 +171,21 @@ const PICKS = [
    max — потолок одной заявки, dps — темп: разрешённый урон копится в ведре
    и вытекает со скоростью dps, так что залп из ста заявок подряд сработает
    как один. Таблица без прототипа: причина приходит от клиента строкой, и
-   'constructor' не должен превращаться в правило (см. §9.5). */
-const SELF_CAUSE = Object.create(null);
-SELF_CAUSE.frag = { i:0, n:'frag', max:AMMO[1].splashMax * V_DMG_TOL, dps:70 };
-SELF_CAUSE.burn = { i:1, n:'burn', max:AMMO[2].burnDps * 0.75, dps:AMMO[2].burnDps * 1.6 };
-SELF_CAUSE.fall = { i:2, n:'fall', max:100, dps:100 };   // падение с высоты убивает разом
+   'constructor' не должен превращаться в правило (см. §9.5).
+
+   Таблиц две — по одной на ствол: под ногами у лучника рвётся взрывная стрела,
+   а не фугас, и её площадь слабее. Клиент выводит свою порцию из тех же чисел
+   (NT_selfCap в 92_net.js), так что разъехавшиеся потолки означают отклонённый
+   честный самоурон. */
+function SRV_selfTable(w){
+  const A = WEAPONS[SRV_w(w)].ammo;
+  const t = Object.create(null);
+  t.frag = { i:0, n:'frag', max:(A[1].splashMax || A[1].dmgMax) * V_DMG_TOL, dps:70 };
+  t.burn = { i:1, n:'burn', max:A[2].burnDps * 0.75, dps:A[2].burnDps * 1.6 };
+  t.fall = { i:2, n:'fall', max:100, dps:100 };   // падение с высоты убивает разом
+  return t;
+}
+const SELF_CAUSE = [ SRV_selfTable(0), SRV_selfTable(1) ];
 
 /* ====================== УТИЛИТЫ ====================== */
 const SRV_T0 = Date.now();
@@ -461,8 +513,9 @@ function SRV_botCount(){ return Math.max(0, RULES.slots - SRV_players.size); }
 function SRV_status(){
   const ps = [];
   for(const p of SRV_players.values())
-    ps.push({ id:p.id, name:p.name, team:p.team?'RED':'BLU', hp:Math.round(p.hp),
-              alive:p.alive, kills:p.kills, deaths:p.deaths, ping:p.ping, rejects:p.rejTotal });
+    ps.push({ id:p.id, name:p.name, team:p.team?'RED':'BLU', wpn:WEAPONS[p.w].id,
+              hp:Math.round(p.hp), alive:p.alive, kills:p.kills, deaths:p.deaths,
+              ping:p.ping, rejects:p.rejTotal });
   return { ver:VER, up:Math.round(SRV_now()/1000), rules:RULES,
            blu:SRV_score[0], red:SRV_score[1], host:SRV_hostId,
            bots:SRV_botCount(), players:ps };
@@ -550,9 +603,13 @@ function SRV_hello(c, m){
     id: SRV_nextId++, c: c, name: name, team: team,
     hp: 100, alive: true, kills: 0, deaths: 0,
     x:0, y:0, z:0, yaw:0, pitch:0, h:1.8, f:0, s:0,
+    /* Ствол: 0 винтовка, 1 лук. По нему выбирается ВСЯ таблица боеприпасов,
+       поэтому поле обязано быть у игрока с первой же секунды, ещё до боя.
+       wAt — когда ствол меняли в последний раз (см. SRV_onHello2). */
+    w: SRV_w(m.w), wAt: -1e9,
     lastMsg: SRV_now(), ping: 0, pingSent: 0,
     respawnAt: 0,
-    burnLeft: 0, burnAcc: 0, burnBy: -1,
+    burnLeft: 0, burnAcc: 0, burnBy: -1, burnDps: RIFLE_AMMO[2].burnDps,
     shotAt: [-1e9, -1e9, -1e9],
     shots: [], shotN: 0,
     /* Самоурон: по ведру на причину (frag/burn/fall), см. SELF_CAUSE. */
@@ -574,7 +631,7 @@ function SRV_hello(c, m){
   const list = [];
   for(const q of SRV_players.values())
     list.push({ id:q.id, name:q.name, team:q.team, hp:Math.round(q.hp),
-                alive:q.alive, kills:q.kills, deaths:q.deaths });
+                alive:q.alive, kills:q.kills, deaths:q.deaths, w:q.w });
 
   SRV_sendTo(p, {
     t:'welcome', id:p.id, team:p.team, k:SRV_now(), goal:RULES.goal,
@@ -582,7 +639,7 @@ function SRV_hello(c, m){
     respawn:RULES.respawn,         // секунды: клиент не имеет права дублировать константу
     host:SRV_hostId, players:list
   });
-  SRV_bcast({ t:'join', id:p.id, name:p.name, team:p.team }, p.id);
+  SRV_bcast({ t:'join', id:p.id, name:p.name, team:p.team, w:p.w }, p.id);
   /* Стартовую точку рассылаем ВСЕМ, КРОМЕ новичка: он ещё в лобби, боя не
      начинал, и применить respawn ему некуда — координаты уедут в физику
      вхолостую. Свою точку он получит первым же resp после старта. */
@@ -598,7 +655,7 @@ function SRV_hello(c, m){
     }
   }
   SRV_log('вошёл [' + p.id + '] ' + p.name + ' · ' + (team ? 'RED' : 'BLU') +
-          ' · в комнате ' + SRV_players.size + ', ботов ' + SRV_botCount());
+          ' · ' + WEAPONS[p.w].id + ' · в комнате ' + SRV_players.size + ', ботов ' + SRV_botCount());
   SRV_sendScore();
 }
 
@@ -652,23 +709,40 @@ function SRV_onMove(p, m){
 }
 
 /* ---------- выстрел ---------- */
-function SRV_minInterval(a){
-  // темп ограничен и откатом типа, и затвором — что больше, то и правит
-  return Math.max(AMMO[a].cd, AMMO[a].bolt);
+/* Минимальный интервал между выстрелами ОДНОГО типа.
+
+   Винтовка: темп ограничен и откатом типа, и затвором — что больше, то и правит.
+
+   Лук: затвора в этом смысле у него нет. Чтобы выстрелить снова, лучник
+   накладывает стрелу (bolt) и только потом тянет тетиву (drawTime; тянуть
+   раньше, чем стрела легла, оружие не даёт). Значит минимум складывается из
+   наложения и того натяга, который стрелок ЗАЯВИЛ сам полем c: полный натяг
+   стоит всё положенное время, слабый — меньше.
+
+   Нижнего порога у натяга сознательно НЕТ. Срыв — законный выстрел: тетива
+   уходит из пальцев почти сразу, стрела падает под ноги и почти не бьёт, но
+   это игрок, а не читер. Заложи мы «минимальный осмысленный натяг», и такая
+   стрельба отклонялась бы как невозможная, хотя оружие её разрешает. */
+function SRV_minInterval(p, a, chg){
+  const W = WEAPONS[p.w], A = W.ammo[a];
+  if(!W.bow) return Math.max(A.cd, A.bolt);
+  const c = SRV_num(chg) ? SRV_clamp(chg, 0, 1) : 0;
+  return Math.max(A.cd, A.bolt + W.drawTime * c);
 }
 function SRV_onShot(p, m){
   const now = SRV_now();
   if(!p.alive){ SRV_reject(p, 'выстрел мёртвого'); return; }
   const a = m.a | 0;
-  if(a < 0 || a > 2){ SRV_reject(p, 'неизвестный боеприпас ' + SRV_clean(m.a, 8)); return; }
+  const A = SRV_ammo(p, a);
+  if(!A){ SRV_reject(p, 'неизвестный боеприпас ' + SRV_clean(m.a, 8)); return; }
   if(!SRV_num(m.ox) || !SRV_num(m.oy) || !SRV_num(m.oz) ||
      !SRV_num(m.dx) || !SRV_num(m.dy) || !SRV_num(m.dz)){
     SRV_reject(p, 'нечисловой выстрел'); return;
   }
-  const need = SRV_minInterval(a) * 1000 * V_RATE;
+  const need = SRV_minInterval(p, a, m.c) * 1000 * V_RATE;
   const gap  = now - p.shotAt[a];
   if(gap < need){
-    SRV_reject(p, 'темп ' + AMMO[a].id + ': ' + Math.round(gap) + ' мс при минимуме ' + Math.round(need));
+    SRV_reject(p, 'темп ' + A.id + ': ' + Math.round(gap) + ' мс при минимуме ' + Math.round(need));
     return;
   }
   const ex = m.ox - p.x, ey = m.oy - p.y, ez = m.oz - p.z;
@@ -718,7 +792,10 @@ function SRV_onHit(p, m){
      считалась отклонением вообще — просто уезжала хосту. */
   if(!p.alive){ SRV_reject(p, 'попадание от мёртвого'); return; }
   const a = m.a | 0;
-  if(a < 0 || a > 2){ SRV_reject(p, 'неизвестный боеприпас ' + SRV_clean(m.a, 8)); return; }
+  /* Таблица — ТОГО ствола, которым заявитель стреляет: стрела и пуля с одним
+     индексом бьют по-разному, и потолок обязан быть от своей строки. */
+  const A = SRV_ammo(p, a);
+  if(!A){ SRV_reject(p, 'неизвестный боеприпас ' + SRV_clean(m.a, 8)); return; }
   const d = SRV_num(m.d) ? m.d : -1;
   if(!(d > 0)){ SRV_reject(p, 'нечисловой урон'); return; }
 
@@ -727,12 +804,12 @@ function SRV_onHit(p, m){
   /* 'burn' — заявка о поджоге бота от не-хоста: она приходит одной суммой
      за всё время горения, поэтому потолок у неё свой, а не как у удара. */
   const part = (m.p === 'head' || m.p === 'legs' || m.p === 'splash' || m.p === 'burn') ? m.p : 'body';
-  const cap  = (part === 'head'   ? AMMO[a].headMax :
-                part === 'splash' ? (AMMO[a].splashMax || AMMO[a].dmgMax) :
-                part === 'burn'   ? ((AMMO[a].burnTime*AMMO[a].burnDps) || AMMO[a].dmgMax) :
-                AMMO[a].dmgMax) * V_DMG_TOL;
+  const cap  = (part === 'head'   ? A.headMax :
+                part === 'splash' ? (A.splashMax || A.dmgMax) :
+                part === 'burn'   ? ((A.burnTime*A.burnDps) || A.dmgMax) :
+                A.dmgMax) * V_DMG_TOL;
   if(d > cap){
-    SRV_reject(p, 'урон ' + Math.round(d) + ' > потолка ' + Math.round(cap) + ' для ' + AMMO[a].id + '/' + part);
+    SRV_reject(p, 'урон ' + Math.round(d) + ' > потолка ' + Math.round(cap) + ' для ' + A.id + '/' + part);
     return;
   }
 
@@ -747,7 +824,7 @@ function SRV_onHit(p, m){
     if(!/^b\d{1,3}$/.test(m.v)){ SRV_reject(p, 'бот ' + SRV_clean(m.v, 8) + ' не индекс'); return; }
     const now = SRV_now();
     if(now - p.shotAt[a] > V_HITWIN){
-      SRV_reject(p, 'урон боту без выстрела ' + AMMO[a].id); return;
+      SRV_reject(p, 'урон боту без выстрела ' + A.id); return;
     }
     /* Темп: одна очередь = один выстрел. Фугас накрывает нескольких сразу,
        поэтому считаем заявки на выстрел, а не на секунду. */
@@ -773,7 +850,7 @@ function SRV_onHit(p, m){
 
   const cy = v.y + v.h * 0.5;
   if(!SRV_matchShot(p, a, v.x, cy, v.z)){
-    SRV_reject(p, 'попадание без подходящего выстрела ' + AMMO[a].id + ' (' + Math.round(dist) + ' м)');
+    SRV_reject(p, 'попадание без подходящего выстрела ' + A.id + ' (' + Math.round(dist) + ' м)');
     return;
   }
   SRV_damage(v, d, p.id, part);
@@ -783,7 +860,10 @@ function SRV_onHit(p, m){
 function SRV_onBoom(p, m){
   if(!SRV_num(m.x) || !SRV_num(m.y) || !SRV_num(m.z)) return;
   const a = m.a | 0;
-  if(a < 0 || a > 2) return;
+  /* Радиус и потолок площади — из таблицы стрелка: взрывная стрела рвёт слабее
+     фугаса и в меньшем круге. */
+  const A = SRV_ammo(p, a);
+  if(!A) return;
   /* Ретрансляцию эффекта тоже держим за проверками: иначе чужой экран можно
      засыпать взрывами, ничего не стреляя. Луч при этом не сверяем — эффект
      важнее строгости, а урон ниже проверяется отдельно. */
@@ -792,14 +872,14 @@ function SRV_onBoom(p, m){
   if(ex*ex + ey*ey + ez*ez > V_RANGE*V_RANGE){ SRV_reject(p, 'эпицентр за пределами карты'); return; }
   SRV_bcast({ t:'boom', x:SRV_r2(m.x), y:SRV_r2(m.y), z:SRV_r2(m.z), a:a }, p.id);
 
-  const R = AMMO[a].splashR;
+  const R = A.splashR;
   if(!R) return;                               // не фугас — только эффект
   if(!SRV_matchShot(p, a, m.x, m.y, m.z)){ SRV_reject(p, 'фугас без выстрела'); return; }
 
   const h = m.h;
   if(!Array.isArray(h)) return;
   const n = Math.min(h.length, RULES.slots);
-  const cap = AMMO[a].splashMax * V_DMG_TOL;
+  const cap = A.splashMax * V_DMG_TOL;
   const lim = R * 1.25;                        // накрытие считал клиент по своим позициям — даём запас
   for(let i=0;i<n;i++){
     const e = h[i];
@@ -823,11 +903,17 @@ function SRV_onBurn(p, m){
   if(!v || !v.alive || v.team === p.team || v.id === p.id) return;
   const d = SRV_num(m.d) ? m.d : 0;
   if(!(d > 0)) return;
-  if(d > BURN_TOTAL * V_DMG_TOL){
-    SRV_reject(p, 'горение ' + Math.round(d) + ' > запаса ' + BURN_TOTAL); return;
+  /* Запас горения — из таблицы ПОДЖЁГШЕГО: у зажигательного патрона и у
+     огненной стрелы он свой, и мерить чужой заявкой нельзя. */
+  const total = SRV_burnTotal(p.w);
+  if(d > total * V_DMG_TOL){
+    SRV_reject(p, 'горение ' + Math.round(d) + ' > запаса ' + Math.round(total)); return;
   }
-  /* Горение не перезаписывается, а складывается — как и на клиенте. */
-  v.burnLeft = Math.min(v.burnLeft + d, BURN_TOTAL * 2);
+  /* Горение не перезаписывается, а складывается — как и на клиенте. Темп
+     списания запоминаем от поджёгшего: гореть жертва обязана с той скоростью,
+     с какой её подожгли, а не с какой она сама носит оружие. */
+  v.burnLeft = Math.min(v.burnLeft + d, BURN_MAX * 2);
+  v.burnDps = WEAPONS[p.w].ammo[2].burnDps;
   v.burnBy = p.id;
 }
 
@@ -879,7 +965,7 @@ function SRV_onPick(p, m){
    Он присылает заявку, а величину и темп решаем мы. */
 function SRV_onSelf(p, m){
   if(!p.alive) return;                 // умер до того, как долетела заявка — не нарушение
-  const c = SELF_CAUSE[m.c];           // таблица без прототипа: '__proto__' сюда не пролезет
+  const c = SELF_CAUSE[p.w][m.c];      // таблица без прототипа: '__proto__' сюда не пролезет
   if(!c){ SRV_reject(p, 'самоурон с причиной ' + SRV_clean(m.c, 12)); return; }
   let d = SRV_num(m.d) ? m.d : 0;
   if(!(d > 0)) return;
@@ -939,6 +1025,29 @@ function SRV_onBotHit(p, m){
 }
 
 /* ---------- прочее ---------- */
+/* Второй 'hello' сессию не пересоздаёт: имя, команда и id у игрока уже есть.
+   А вот СТВОЛ он меняет — и это единственная причина, по которой повторный
+   hello вообще осмыслен. Ствол выбирают в брифинге, то есть УЖЕ ПОСЛЕ входа
+   в комнату, и сервер обязан узнать о выборе до первого выстрела: иначе он
+   проверит заявки лучника по винтовочной таблице и отклонит честные. */
+function SRV_onHello2(p, m){
+  if(m.w === undefined) return;
+  const w = SRV_w(m.w);
+  if(w === p.w) return;
+  /* Ствол принимаем ВСЕГДА и без условий: если наша таблица разойдётся с той,
+     из которой клиент считает урон, отклонены будут честные заявки. */
+  p.w = w;
+  /* А вот отметки прошлых выстрелов — вопрос отдельный. Сменилась вся таблица,
+     и держать в них чужие затворы значит отклонить первый честный выстрел
+     нового ствола. Но обнулять их на каждый чих нельзя: «hello туда — hello
+     обратно» стало бы способом стрелять вообще без темпа. Поэтому обнуляем не
+     чаще раза в WPN_SWAP: смена оружия — это выход в брифинг, а не приём боя. */
+  const now = SRV_now();
+  if(now - p.wAt >= WPN_SWAP) p.shotAt[0] = p.shotAt[1] = p.shotAt[2] = -1e9;
+  p.wAt = now;
+  SRV_log('ствол [' + p.id + '] ' + p.name + ' → ' + WEAPONS[w].id);
+}
+
 function SRV_onResp(p){
   if(p.alive) return;
   if(SRV_now() < p.respawnAt) return;       // рано: время смерти ведёт сервер
@@ -966,7 +1075,7 @@ SRV_H.bots  = SRV_onBots;
 SRV_H.bhit  = SRV_onBotHit;
 SRV_H.resp  = SRV_onResp;
 SRV_H.pong  = SRV_onPong;
-SRV_H.hello = function(){};               // второй hello — не повод ломать сессию
+SRV_H.hello = SRV_onHello2;               // второй hello — не повод ломать сессию
 
 /* ====================== АВТОРИТЕТ: УРОН, СМЕРТЬ, РЕСПАВН ====================== */
 function SRV_damage(v, dmg, byId, part){
@@ -1045,7 +1154,7 @@ function SRV_entry(i){
   /* tm — команда (§9.5). Без неё клиент, впервые увидевший игрока в снапшоте
      (join потерялся или пришёл позже), молча зачисляет его в BLU: свой цвет,
      свой — значит непростреливаемый. */
-  if(!e) e = SRV_snapPool[i] = { i:0, tm:0, x:0, y:0, z:0, yaw:0, pitch:0, h:0, f:0, hp:0, a:1 };
+  if(!e) e = SRV_snapPool[i] = { i:0, tm:0, w:0, x:0, y:0, z:0, yaw:0, pitch:0, h:0, f:0, hp:0, a:1 };
   return e;
 }
 
@@ -1058,7 +1167,7 @@ function SRV_tick(){
          клиенту на каждое сообщение прилетает вспышка и тряска. --- */
   for(const p of SRV_players.values()){
     if(!p.alive || p.burnLeft <= 0) continue;
-    const step = Math.min(AMMO[2].burnDps * SRV_DT, p.burnLeft);
+    const step = Math.min(p.burnDps * SRV_DT, p.burnLeft);
     p.burnLeft -= step;
     p.burnAcc  += step;
     if(p.burnAcc >= 4 || p.burnLeft <= 0 || p.hp - p.burnAcc <= 0){
@@ -1115,7 +1224,9 @@ function SRV_tick(){
   let n = 0;
   for(const p of SRV_players.values()){
     const e = SRV_entry(n++);
-    e.i = p.id; e.tm = p.team;
+    /* w — ствол бойца (§9.6). Без него остальные покажут лучника с винтовкой
+       в руках, а стрелок с луком выглядит и звучит иначе, чем снайпер. */
+    e.i = p.id; e.tm = p.team; e.w = p.w;
     e.x = SRV_r2(p.x); e.y = SRV_r2(p.y); e.z = SRV_r2(p.z);
     e.yaw = SRV_r4(p.yaw); e.pitch = SRV_r4(p.pitch);
     e.h = SRV_r2(p.h); e.f = p.f;

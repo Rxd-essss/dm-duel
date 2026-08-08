@@ -14,6 +14,8 @@ const HUD_NOCD   = [0,0,0];          // подстраховка, пока wpn.c
 const HUD_slots  = [null,null,null]; // .slot пояса
 const HUD_cdFill = [null,null,null]; // заливка отката внутри слота
 const HUD_cdTxt  = [null,null,null]; // секунды до готовности
+const HUD_beltNm = [null,null,null]; // подпись типа в слоте: «МАТЧ» / «СТРЕЛА»
+const HUD_beltRf = [null,null,null]; // какой элемент AMMO в слоте уже нарисован
 const HUD_prevCd = [0,0,0];          // остаток отката в прошлом кадре
 const HUD_rdyT   = [0,0,0];          // таймер вспышки «снова готов»
 const HUD_pct    = [-1,-1,-1];       // закешированная высота заливки
@@ -22,6 +24,7 @@ let HUD_ready = false;
 let HUD_lastT = 0;                   // game.time прошлого кадра — свой dt
 let HUD_numKey = -1, HUD_nameTxt = '', HUD_cdDecCur = -1;
 let HUD_scKey = -1;
+let HUD_xhCls = '';                  // класс цвета типа на марке (обеих марках)
 let HUD_windArw = null;              // стрелка ветра: узел кэшируем, пишем раз в градус
 let HUD_windDeg = 1e9;
 
@@ -31,9 +34,25 @@ function HUD_bind(){
     HUD_slots[i]  = document.querySelector('#ammoBelt .slot[data-a="'+i+'"]');
     HUD_cdFill[i] = $('cdF'+i);
     HUD_cdTxt[i]  = $('cdT'+i);
+    HUD_beltNm[i] = HUD_slots[i] ? HUD_slots[i].querySelector('.n') : null;
   }
   HUD_windArw = $('windArw');
   HUD_ready = !!HUD_slots[0];
+}
+
+/* Подписи пояса. У лука в тех же трёх слотах лежат стрелы, а не патроны, и
+   написано там обязано быть то, что летит. Сравниваем по ссылке на элемент
+   AMMO, а не по строке: содержимое AMMO подменяется на месте (setWeapon),
+   поэтому смена ствола — это ровно смена трёх ссылок, и склейка ключа из
+   строк каждый кадр была бы аллокацией на ровном месте. */
+function HUD_paintBelt(){
+  HUD_bind();
+  for(let i=0;i<3;i++){
+    const a = AMMO[i];
+    if(a === HUD_beltRf[i]) continue;
+    HUD_beltRf[i] = a;
+    if(HUD_beltNm[i]) HUD_beltNm[i].textContent = a.short;
+  }
 }
 
 /* ---------------------------- ТАЙМЕРЫ HUD ----------------------------
@@ -201,6 +220,164 @@ function HUD_bindTeamUI(){
   }
 }
 
+/* ============================== ОРУЖИЕ ==============================
+   Стволов два, и они играются по-разному: винтовка бьёт почти прямо и смотрит
+   в оптику, лук вынуждает брать выше цели и тянуть тетиву. Значит выбор ствола
+   — решение того же веса, что сторона и сложность, и стоит он там же.
+
+   Единственный источник правды — game.weapon (литерал в 60_weapon.js).
+   Всё, что зависит от ствола (боекомплект, пояс, марка, раскладка), читается
+   из WPNS/AMMO и НИГДЕ не дублируется текстом: рабочий массив AMMO подменяет
+   на месте setWeapon() из ядра, и второй экземпляр этих строк в разметке
+   однажды разойдётся с оружием. */
+const HUD_LS_WPN = 'dmduel.weapon';
+/* Проза про каждый тип — по id боеприпаса, а не по индексу слота: у лука в
+   тех же трёх слотах лежат стрелы. Цифры не повторяем: их несёт AMMO[i].stat. */
+const HUD_AMMO_DESC = {
+  match:'Скорость, малое падение и снос. <b>Единственный с полным критом в голову</b>.',
+  frag:'Подрыв площадью, <b>крита нет вообще</b>: максимум в эпицентре, за укрытием '+
+       'вдвое меньше. Тяжёлая пуля проседает — берите выше.',
+  fire:'Прямой урон слабый, но цель <b>горит</b> и за углом. Промах оставляет очаг '+
+       'на подходе.',
+  arrow:'Самая настильная из трёх — и всё равно втрое медленнее пули. '+
+        '<b>Единственная с полным критом в голову</b>. Недотянутый лук бьёт вразброс.',
+  bomb:'Летит ниже и медленнее всех, упреждение берите вдвое. <b>Крита нет вообще</b>, '+
+       'зато накрывает площадью — ею выкуривают из-за зубцов.',
+  flame:'Прямой урон слабый, но цель <b>горит</b> и за углом; промах поджигает подход.'
+};
+/* Одна строка под карточками — как в этом бою работает ЛКМ. Ровно одна:
+   подвал брифинга и так впритык, а подробности лежат в колонке раскладки. */
+const HUD_WPN_LMB = [
+  '<b>ЛКМ</b> — выстрел, <b>ПКМ</b> — оптика.',
+  '<b>ЛКМ</b> — держать и отпустить: тянут тетиву, потом пускают.'
+];
+let HUD_wantWpn  = 0;    // выбор игрока в брифинге
+let HUD_wpnShown = -1;   // какой ствол уже нарисован; -1 — перерисовать
+
+function weaponChoice(){ return HUD_wantWpn; }
+/* Выбор в брифинге. Пишем и в game.weapon, и в localStorage, и сразу
+   подменяем рабочий AMMO: карточки боекомплекта, пояс и марка обязаны
+   показывать выбранный ствол ДО начала боя, а не после startGame(). */
+function setWeaponChoice(i){
+  HUD_wantWpn = (i|0) === 1 ? 1 : 0;
+  try{ localStorage.setItem(HUD_LS_WPN, HUD_wantWpn ? '1' : '0'); }catch(e){}
+  game.weapon = HUD_wantWpn;
+  if(typeof setWeapon === 'function') setWeapon(HUD_wantWpn);
+  HUD_wpnShown = -1;
+  HUD_syncWeapon();
+}
+/* Дешёвая проверка «ствол тот же» — зовётся каждый кадр из updateAmmoHUD:
+   game.weapon может смениться и мимо брифинга (рестарт, сеть), а HUD не имеет
+   права остаться с чужой маркой и чужими подписями. */
+function HUD_syncWeapon(){
+  const i = (game.weapon|0) === 1 ? 1 : 0;
+  if(i === HUD_wpnShown) return i;
+  HUD_wpnShown = i;
+  const w = WPNS[i];
+  // один класс на body: марка, оптика и шкала натяга переключаются в CSS,
+  // а не пятью правками узлов по месту
+  if(document.body) document.body.classList.toggle('bow', !!w.bow);
+  HUD_paintWpnSel();
+  HUD_paintAmmoCards();
+  HUD_paintBelt();
+  // подписи и заливки закешированы по числам — числа те же, а смысл другой
+  HUD_numKey = -1; HUD_nameTxt = ''; HUD_scKey = -1; HUD_cdDecCur = -1; HUD_aimCapK = -1;
+  for(let k=0;k<3;k++){ HUD_pct[k] = -1; HUD_dec[k] = -1; }
+  if(typeof updateReticle === 'function') updateReticle();
+  return i;
+}
+/* Карточки боекомплекта в брифинге. Имя, откат, статистика — из AMMO
+   выбранного ствола; своя здесь только проза про роль типа. */
+function HUD_paintAmmoCards(){
+  const list = weaponOf(game.weapon).ammo;
+  for(let i=0;i<3;i++){
+    const a = list[i]; if(!a) continue;
+    const n = $('an'+i); if(n) n.textContent = (i+1)+' · '+a.name;
+    const e = $('ae'+i);
+    if(e) e.textContent = a.cd > 0 ? ('ОТКАТ '+(a.cd.toFixed(1).replace('.0',''))+' С') : 'БЕЗ ОТКАТА';
+    const d = $('ad'+i); if(d) d.innerHTML = HUD_AMMO_DESC[a.id] || '';
+    // строку stat заполняет и bindUI() из 90_game.js — из того же AMMO, тем же
+    // текстом; расходиться им не на чем
+    const s = $('s'+(i+1)); if(s) s.textContent = a.stat;
+  }
+}
+/* Карточки выбора ствола и всё, что в брифинге зависит от ствола. */
+function HUD_paintWpnSel(){
+  const sel = $('wpnSel');
+  if(sel){
+    const bs = sel.querySelectorAll('.wm');
+    for(let i=0;i<bs.length;i++) bs[i].classList.toggle('on', (+bs[i].dataset.w|0) === HUD_wpnShown);
+  }
+  for(let i=0;i<WPNS.length;i++){
+    const w = WPNS[i];
+    // короткое имя, а не полное: карточки стоят по две в ряд, и «СНАЙПЕРСКАЯ
+    // ВИНТОВКА» ломается на две строки. Полное имя игрок видит в панели патронов
+    const n = $('wn'+i); if(n) n.textContent = w.short;
+    const d = $('wd'+i); if(d) d.textContent = w.hint;
+    const t = $('wt'+i);
+    // подпись «чем берёт» собираем из полей ствола: правка drawTime в ядре
+    // иначе молча оставит здесь враньё
+    if(t) t.textContent = w.scope ? 'ОПТИКА · ПЛОСКО'
+                                  : ('ДУГА · НАТЯГ '+(+w.drawTime).toFixed(2)+' С');
+  }
+  const bow = !!WPNS[HUD_wpnShown < 0 ? 0 : HUD_wpnShown].bow;
+  const h = $('wpnHint'); if(h) h.innerHTML = HUD_WPN_LMB[bow ? 1 : 0];
+  HUD_txt('ammoSec',   bow ? 'Колчан' : 'Боекомплект');
+  HUD_txt('ctlFire',   bow ? 'ЛКМ — держать, отпустить' : 'ЛКМ');
+  HUD_txt('ctlScopeV', bow ? 'у лука её нет' : 'ПКМ');
+  HUD_txt('ctlAmmoK',  bow ? 'Тип стрелы' : 'Тип патрона');
+  HUD_txt('ruleChargeV', bow ? 'растёт с натягом' : 'растёт с зарядом');
+  HUD_txt('ruleAimK',    bow ? 'Недотянутая тетива' : 'Стрельба без оптики');
+  HUD_txt('ruleAimV',    bow ? 'слабее, медленнее, вразброс' : 'большой разброс');
+  HUD_txt('balDropK',    bow ? 'Стрела летит по дуге' : 'Пуля летит по дуге');
+  HUD_txt('balDropV',    bow ? 'просадка около 6 м на 100 м' : 'время полёта + падение');
+  HUD_txt('balRetK',     bow ? 'Метки дуги у марки' : 'Метки сетки оптики');
+  HUD_txt('balRetV',     bow ? HUD_HOLD_R[0]+' · '+HUD_HOLD_R[1]+' · '+HUD_HOLD_R[2]+' м'
+                             : '50 … 300 м, шаг 50');
+  HUD_txt('balWindV',    bow ? 'сносит стрелу вдвое сильнее' : 'случайный на бой');
+  HUD_txt('pauseWpnV',   bow ? 'боевой лук' : 'снайперская винтовка');
+  HUD_off('rowScope', bow); HUD_off('rowZoom', bow); HUD_off('rowHold', bow);
+  HUD_off('rowRange', bow);
+  const rd = $('rowDraw'); if(rd) rd.classList.toggle('hide', !bow);
+}
+function HUD_txt(id, s){ const e = $(id); if(e && e.textContent !== s) e.textContent = s; }
+function HUD_off(id, on){ const e = $(id); if(e) e.classList.toggle('off', on); }
+
+function HUD_bindWpnUI(){
+  const sel = $('wpnSel'); if(!sel) return;
+  const bs = sel.querySelectorAll('.wm');
+  for(let i=0;i<bs.length;i++){
+    const b = bs[i];
+    b.onclick = ()=> setWeaponChoice(+b.dataset.w);
+  }
+}
+
+/* ---------------------------- ПОЛНЫЙ ЭКРАН ----------------------------
+   Механику держит 90_game.js (toggleFullscreen / isFullscreen / клавиша F),
+   за нами кнопки. Их две — в брифинге и в паузе, — поэтому общий класс .fsbtn,
+   а id 'fsBtn' стоит на главной: по нему подпись синхронизирует GM_fsSync.
+   Свой синхронизатор нужен второй кнопке и пишет ровно тот же текст, так что
+   два обработчика на одно событие друг другу не мешают. */
+function HUD_fsSync(){
+  let on = false;
+  try{
+    on = (typeof isFullscreen === 'function') ? isFullscreen()
+       : !!(document.fullscreenElement || document.webkitFullscreenElement);
+  }catch(e){}
+  const txt = on ? 'ОКНО' : 'ВО ВЕСЬ ЭКРАН';
+  const bs = document.querySelectorAll('.fsbtn');
+  for(let i=0;i<bs.length;i++) if(bs[i].textContent !== txt) bs[i].textContent = txt;
+}
+function HUD_bindFsUI(){
+  const bs = document.querySelectorAll('.fsbtn');
+  if(!bs.length) return;
+  for(let i=0;i<bs.length;i++)
+    bs[i].onclick = ()=>{ if(typeof toggleFullscreen === 'function') toggleFullscreen(); };
+  document.addEventListener('fullscreenchange', HUD_fsSync);
+  document.addEventListener('webkitfullscreenchange', HUD_fsSync);
+  HUD_fsSync();
+}
+
 /* Разметку брифинга поднимаем сами: bindUI() из 90_game.js про выбор стороны
    не знает, а трогать чужой модуль ради одной привязки нельзя. Вызов
    идемпотентен — скрипт стоит в конце body, разметка уже разобрана. */
@@ -218,6 +395,14 @@ function hudInit(){
   HUD_bindTeamUI();
   setTeamHUD(HUD_wantTeam);
   HUD_paintTeamSel();
+  /* Оружие ставим ДО boot(): bindUI() из 90_game.js заполняет строки stat из
+     рабочего AMMO, и к этому моменту в нём обязан лежать уже выбранный ствол,
+     иначе игрок с сохранённым луком увидит в карточках цифры винтовки. */
+  let savedW = null;
+  try{ savedW = localStorage.getItem(HUD_LS_WPN); }catch(e){}
+  HUD_bindWpnUI();
+  HUD_bindFsUI();
+  setWeaponChoice((savedW === '1') ? 1 : 0);
 }
 
 /* ------------------------------ ЗДОРОВЬЕ ------------------------------ */
@@ -289,6 +474,53 @@ function setDashHUD(ratio, ready){
   HUD_applyDash(ratio, ready===undefined ? (ratio>=1) : !!ready);
 }
 
+/* ------------------------------ НАТЯГ ЛУКА ------------------------------
+   Шкалу и кольцо марки ведёт оружейный модуль: только он знает, сколько уже
+   натянуто и с какого момента выстрел идёт в полную силу. HUD рисует ровно
+   то, что ему сказали, и гасит шкалу сам, если сеттер перестали звать —
+   отпущенная тетива не должна оставлять на экране застывшую полосу.
+
+   Кольцо марки — не украшение: недотянутый лук бьёт вразброс, и радиус
+   кольца это и показывает. На полном натяге кольцо замыкается и золотеет. */
+let HUD_drawPct = -1, HUD_drawFull = null, HUD_drawOn = null;
+let HUD_drawAge = 99, HUD_ringPx = -1;
+const HUD_RING_MIN = 9;     // радиус кольца на полном натяге, px
+const HUD_RING_MAX = 35;    // и на отпущенной тетиве
+function HUD_applyDraw(r, full){
+  const pct = Math.round(r*100);
+  if(pct !== HUD_drawPct){
+    HUD_drawPct = pct;
+    const f = $('drawFill'); if(f) f.style.width = pct+'%';
+    const c = $('drawCap');  if(c) c.textContent = full ? 'ПОЛНЫЙ НАТЯГ' : 'НАТЯГ '+pct+'%';
+    // радиус кольца ведём в целых пикселях: доли на глаз не читаются,
+    // а лишняя запись в style — это лишний пересчёт стиля каждый кадр
+    const px = Math.round(HUD_RING_MIN + (1-r)*(HUD_RING_MAX-HUD_RING_MIN));
+    if(px !== HUD_ringPx){
+      HUD_ringPx = px;
+      const g = $('xhRing');
+      if(g){ const d = px*2; g.style.width = d+'px'; g.style.height = d+'px'; }
+    }
+  }
+  if(full !== HUD_drawFull){
+    HUD_drawFull = full;
+    const w = $('drawWrap'); if(w) w.classList.toggle('full', full);
+    const b = $('xhBow');    if(b) b.classList.toggle('full', full);
+  }
+  // пока не тянут — полосы нет вовсе: центр экрана это рабочая зона
+  const on = r > 0.001;
+  if(on !== HUD_drawOn){
+    HUD_drawOn = on;
+    const w = $('drawWrap'); if(w) w.classList.toggle('on', on);
+  }
+}
+/* Публичный сеттер для оружейного модуля. ratio 0..1 — насколько натянут лук,
+   ready — можно ли уже пускать в полную силу (по умолчанию «натянут до конца»). */
+function setDrawHUD(ratio, ready){
+  HUD_drawAge = 0;
+  const r = clamp(+ratio || 0, 0, 1);
+  HUD_applyDraw(r, ready===undefined ? (r >= 0.999) : !!ready);
+}
+
 let HUD_burnOn = false, HUD_burnExt = false;
 function HUD_applyBurn(on){
   if(on === HUD_burnOn) return;
@@ -306,7 +538,11 @@ function setBurnHUD(on){ HUD_burnExt = !!on; HUD_applyBurn(HUD_burnExt || player
 let HUD_aimT = 0, HUD_aimD = 60, HUD_aimOut = -1, HUD_aimIn = -1, HUD_aimCapK = -1;
 function HUD_updateAim(dt, a, cooling){
   const z = $('aimZone');
-  const R = a.id==='frag' ? a.splashR : (a.id==='fire' ? a.poolR : 0);
+  /* Признак берём по полям, а не по id: у лука те же три роли называются
+     'bomb' и 'flame', и сравнение с 'frag' молча гасило бы кольцо у взрывной
+     стрелы. Площадь есть у того, у кого есть радиус. */
+  const frag = a.splashR > 0;
+  const R = frag ? a.splashR : (a.poolR > 0 ? a.poolR : 0);
   const show = R>0 && game.state==='play' && player.alive && wpn.rel<=0;
   // прячем целиком: с типом без площади (матчевый) на экране не должно
   // оставаться ни кольца, ни его приглушённого следа
@@ -329,8 +565,8 @@ function HUD_updateAim(dt, a, cooling){
   const dIn  = Math.round(rOut*0.74);
 
   z.classList.add('on');
-  z.classList.toggle('frag', a.id==='frag');
-  z.classList.toggle('fire', a.id==='fire');
+  z.classList.toggle('frag', frag);
+  z.classList.toggle('fire', !frag);
   z.classList.toggle('cool', !!cooling);
   z.classList.toggle('near', near);
   z.classList.toggle('wide', rOut > Math.min(W,H)*0.22);
@@ -344,13 +580,14 @@ function HUD_updateAim(dt, a, cooling){
     HUD_aimIn = dIn;
     const e = $('aimIn'); e.style.width = dIn+'px'; e.style.height = dIn+'px';
   }
-  const capK = (a.id==='frag'?1:2)*4 + (near?2:0) + (cooling?1:0);
+  const capK = (frag?1:2)*4 + (near?2:0) + (cooling?1:0);
   if(capK !== HUD_aimCapK){
     HUD_aimCapK = capK;
+    // подпись берёт короткое имя типа: «ФУГАС» у винтовки, «ВЗРЫВ» у лука
     $('aimCap').textContent = cooling ? 'ОТКАТ'
       : near ? 'СЛИШКОМ БЛИЗКО'
-      : (a.id==='frag' ? 'ФУГАС · R '+a.splashR.toFixed(1)+' М'
-                       : 'ОЧАГ ОГНЯ · R '+a.poolR.toFixed(1)+' М');
+      : (frag ? a.short+' · R '+a.splashR.toFixed(1)+' М'
+              : 'ОЧАГ ОГНЯ · R '+a.poolR.toFixed(1)+' М');
   }
 }
 
@@ -360,6 +597,9 @@ function updateAmmoHUD(){
   // сторона могла смениться между кадрами (сервер прислал команду) — проверка
   // стоит одно сравнение, зато HUD не остаётся покрашенным в чужой цвет
   HUD_applyTeam();
+  // то же и про ствол: смена оружия — это смена подписей пояса и марки
+  HUD_syncWeapon();
+  HUD_paintBelt();
   const a = A();
   const cds = wpn.cd || HUD_NOCD;
 
@@ -423,6 +663,17 @@ function updateAmmoHUD(){
     HUD_applyDash(1 - player.dashCd/full, player.dashCd<=0);
   }
 
+  /* Натяг. Пока оружейный модуль зовёт setDrawHUD, шкалу ведёт он. Если не
+     зовёт — ведём сами по wpn.draw, ровно как шкалу рывка по player.dashCd:
+     HUD не имеет права остаться пустым только потому, что чужой модуль пока
+     не знает про сеттер. И отпущенная тетива не должна оставлять на экране
+     застывшую полосу. */
+  HUD_drawAge += dt;
+  if(HUD_drawAge > 0.25){
+    const d = (HUD_wpnShown === 1 && typeof wpn.draw === 'number') ? clamp(wpn.draw, 0, 1) : 0;
+    HUD_applyDraw(d, d >= 0.999);
+  }
+
   // подпись в оптике: тип, боезапас или остаток отката
   if(wpn.sT>0.6){
     const scKey = ((wpn.idx*512 + cdDec)*64 + wpn.loaded[wpn.idx])*64 + wpn.res[wpn.idx];
@@ -435,10 +686,15 @@ function updateAmmoHUD(){
     }
   }
 
-  // марка: точка красится в цвет типа
-  const xh = $('xh');
+  // марка: точка красится в цвет типа. Марки две — крест винтовки и кольцо
+  // лука; кольцу класс кладём через classList, иначе им же смахнём .full
   const cls = 'a'+(wpn.idx+1);
-  if(xh.className !== cls) xh.className = cls;
+  if(cls !== HUD_xhCls){
+    const prev = HUD_xhCls; HUD_xhCls = cls;
+    const xh = $('xh'); if(xh) xh.className = cls;
+    const xb = $('xhBow');
+    if(xb){ if(prev) xb.classList.remove(prev); xb.classList.add(cls); }
+  }
 
   HUD_updateAim(dt, a, cdNow>0);
   HUD_tickStatus(dt);
@@ -539,8 +795,46 @@ function HUD_tx(x,y,size,col,txt,anchor){
        + ' font-family="Arial,Helvetica,sans-serif" text-anchor="'+(anchor||'start')+'"'
        + ' stroke="rgba(238,246,222,0.40)" stroke-width="0.45" paint-order="stroke fill">'+txt+'</text>';
 }
+/* Падение снаряда на дальности r, в метрах. Модель та же, что у баллистики
+   оружейного модуля: скорость съедает сопротивление, время полёта уточняем
+   одной итерацией. Считают по ней и метки оптики, и метки дуги лука —
+   разъехаться этим двум сеткам нельзя. */
+function HUD_drop(a, r){
+  let t = r/a.v; t = r/(a.v*(1-a.drag*t*0.5));
+  return 0.5*CFG.bulletG*a.gMul*t*t;
+}
+/* Дальности меток. У лука стрела на трёхстах метрах уже не боеприпас, а
+   навесной подарок — шкалу сжимаем под реальные дистанции боя из лука. */
+const HUD_HOLD_R    = [40, 70, 100];                 // метки под маркой лука
+const HUD_RNG_RIFLE = [50,100,150,200,250,300];
+const HUD_RNG_BOW   = [20, 40, 60, 80, 100, 120];
+
+/* Метки просадки под маркой лука. Оптики у лука нет, а держать поправку в
+   голове невозможно: на сотне метров стрела проседает метров на шесть, и без
+   опорных штрихов «выше цели» превращается в гадание. Пересчитываем при смене
+   типа стрелы, обзора и размера окна — updateReticle зовут ровно тогда. */
+function HUD_bowMarks(a){
+  const hold = $('xhHold'); if(!hold) return;
+  /* До первого onResize (и у скрытой вкладки) H равен нулю, и все три метки
+     сложились бы в одну точку под центром — а перерисовать их некому до
+     следующей смены типа. Берём запасную высоту: она всё равно уточнится
+     первым же onResize, который зовёт updateReticle. */
+  const vh = H > 1 ? H : (window.innerHeight || 720);
+  const f = (vh/2)/Math.tan(game.fov*Math.PI/360);  // пикселей на радиан у центра
+  const kids = hold.children;
+  for(let i=0;i<kids.length && i<HUD_HOLD_R.length;i++){
+    const r = HUD_HOLD_R[i];
+    const el = kids[i];
+    el.style.top = Math.round(f*HUD_drop(a, r)/r)+'px';
+    const b = el.firstChild;
+    if(b) b.textContent = String(r);
+  }
+}
+
 function updateReticle(){
   const a = A();
+  const bow = !!weaponOf(game.weapon).bow;
+  if(bow) HUD_bowMarks(a);
   const fov = ZOOMS[wpn.zoom];
   const f = (H/2)/Math.tan(fov*Math.PI/360);
   const lensPx = 0.80*Math.min(W,H);
@@ -568,16 +862,17 @@ function updateReticle(){
   }
 
   // метки падения пули под текущий боеприпас и кратность — в цвет типа
-  const ranges = [50,100,150,200,250,300];
+  const ranges = bow ? HUD_RNG_BOW : HUD_RNG_RIFLE;
   for(const r of ranges){
-    let t = r/a.v; t = r/(a.v*(1-a.drag*t*0.5));
-    const drop = 0.5*CFG.bulletG*a.gMul*t*t;
+    const drop = HUD_drop(a, r);
     const y = 50 + f*Math.tan(Math.atan(drop/r))*k;
     if(y>96.5) break;
     if(y<52.5) continue;
     const half = (r%100===0) ? 4.2 : 2.6;
     s += HUD_ln(50-half,y,50+half,y, 0.55, col);
-    if(r%50===0) s += HUD_tx(50+half+1.4, y+0.9, 2.6, tint, r);
+    // у лука шкала вдвое короче, и подписана каждая метка: неподписанных
+    // ориентиров на такой дуге не хватает
+    if(bow || r%50===0) s += HUD_tx(50+half+1.4, y+0.9, 2.6, tint, r);
   }
 
   // центральная точка: цвет заряженного типа, чтобы не искать глазами пояс

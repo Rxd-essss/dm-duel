@@ -11,7 +11,48 @@ function GM_lock(){
     if(r && r.catch) r.catch(()=>{});   // браузер отказывает ~1 с после выхода по Esc — это не ошибка
   }catch(err){}
 }
-function GM_dropKeys(){ for(const k in keys) keys[k] = false; }
+function GM_dropKeys(){
+  for(const k in keys) keys[k] = false;
+  /* Натяг лука — такое же «зажатое» состояние, как клавиша, и снимать его
+     надо вместе с ними. Но именно СНИМАТЬ, а не спускать тетиву: сюда мы
+     приходим из паузы, потери фокуса и из startGame, где состояние уже
+     «бой» — fireUp() там выпустил бы стрелу на старте матча сам собой. */
+  if(typeof wpn !== 'undefined' && wpn && wpn.drawing){
+    wpn.drawing = false; wpn.draw = 0; wpn.drawT = 0;
+  }
+}
+
+/* ------------------------- ПОЛНОЭКРАННЫЙ РЕЖИМ -------------------------
+   Просят его не ради красоты: в окне браузера снайперская дуэль теряет
+   и обзор, и точность прицеливания мышью. Полноэкранный режим и захват
+   мыши — вещи разные, поэтому переключаем их отдельно: выход из полного
+   экрана по Esc не должен уронить матч, а пауза не должна выкидывать из
+   полного экрана. Префиксы нужны для Safari, там до сих пор webkit-. */
+function isFullscreen(){
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+function toggleFullscreen(){
+  try{
+    if(isFullscreen()){
+      const ex = document.exitFullscreen || document.webkitExitFullscreen;
+      if(ex) { const r = ex.call(document); if(r && r.catch) r.catch(()=>{}); }
+    } else {
+      const el = document.documentElement;
+      const rq = el.requestFullscreen || el.webkitRequestFullscreen;
+      if(rq){ const r = rq.call(el); if(r && r.catch) r.catch(()=>{}); }
+    }
+  }catch(err){}
+}
+function GM_fsSync(){
+  const on = isFullscreen();
+  const b = $('fsBtn');   // кнопку рисует HUD; её может не быть
+  if(b) b.textContent = on ? 'ОКНО' : 'ВО ВЕСЬ ЭКРАН';
+  document.body.classList.toggle('fs', on);
+  /* Размер вьюпорта меняется не в том же кадре, в котором пришло событие:
+     просим перерисовку и пересчитываем камеру на следующем кадре. */
+  onResize();
+  GM_pauseDraw = 2; GM_bgAcc = GM_BG_DT;
+}
 
 function initInput(){
   const cv = document.getElementById('c');
@@ -31,9 +72,14 @@ function initInput(){
   });
   document.addEventListener('mousedown', e=>{
     if(game.state!=='play' || !document.pointerLockElement) return;
-    if(e.button===0) tryFire();
-    if(e.button===2){ wpn.scoped = !wpn.scoped; SFX[wpn.scoped?'scopeIn':'scopeOut'](); }
+    if(e.button===0) fireDown();          // винтовка стреляет сразу, лук начинает натяг
+    if(e.button===2) toggleScope();       // на луке молча ничего не делает: оптики нет
   });
+  /* Отпускание ЛКМ ловим БЕЗ проверки захвата мыши и состояния игры.
+     Причина простая: если кнопку отпустили, когда окно потеряло фокус или
+     курсор вышел из захвата, событие всё равно обязано дойти — иначе лук
+     остаётся натянутым навсегда, и следующий клик стреляет сам собой. */
+  document.addEventListener('mouseup', e=>{ if(e.button===0) fireUp(); });
   document.addEventListener('contextmenu', e=>{ if(game.state==='play') e.preventDefault(); });
   document.addEventListener('wheel', e=>{
     if(game.state!=='play') return;
@@ -62,6 +108,18 @@ function initInput(){
   });
   addEventListener('keyup', e=>{ keys[e.code] = false; });
   addEventListener('blur', GM_dropKeys);
+  /* F — полный экран. Работает и в бою, и в меню, поэтому висит отдельным
+     слушателем ДО проверки состояния игры. F11 не перехватываем: это
+     клавиша браузера, отбирать её у пользователя невежливо. */
+  addEventListener('keydown', e=>{
+    if(e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey){
+      const t = e.target;
+      if(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+      e.preventDefault(); toggleFullscreen();
+    }
+  });
+  document.addEventListener('fullscreenchange', GM_fsSync);
+  document.addEventListener('webkitfullscreenchange', GM_fsSync);
   /* На паузе и в меню цикл рисует не каждый кадр — после смены размера окна
      в буфере остался бы растянутый старый кадр. Просим перерисовку. */
   addEventListener('resize', ()=>{ GM_pauseDraw = 2; GM_bgAcc = GM_BG_DT; });
@@ -105,6 +163,10 @@ function startGame(){
   GM_dropKeys();
   GM_shownSec = -1;
   D = DIFFS[game.diff];
+  /* Оружие ставим ДО сброса боекомплекта: setWeapon подменяет содержимое
+     AMMO на месте, и всё, что ниже читает AMMO[i], обязано видеть уже
+     выбранный ствол. */
+  setWeapon(game.weapon|0);
 
   // оружие: откаты типов обязаны обнулиться, иначе рестарт начинается «в блоке»
   wpn.idx=0; wpn.zoom=0; wpn.scoped=false; wpn.sT=0; wpn.charge=0;

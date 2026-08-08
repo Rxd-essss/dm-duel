@@ -10,6 +10,13 @@
        все report*() — это именно заявки, а не применение урона;
      · здоровье, счёт, респавн и пикапы приходят сверху и применяются как есть.
 
+   Стволов теперь два, и это протокольный факт, а не косметика (§9.6):
+   сервер проверяет урон и темп по таблице ТОГО оружия, которым заявитель
+   стреляет, а таблицы у винтовки и лука разные. Поэтому свой ствол мы
+   объявляем в 'hello' и переобъявляем при смене, а чужой читаем из записи
+   снапшота и кладём в NET.players[id].w — оттуда его берут и модель реплики,
+   и потолок урона по боту, который применяет хост.
+
    В одиночной игре NET.on === false, и тогда весь модуль — набор пустых
    вызовов: каждый публичный метод выходит первой же строкой.
    ===================================================================== */
@@ -52,6 +59,10 @@ let NT_ended  = false;        // итоги матча уже показаны
 let NT_acc    = 0;            // накопитель тика отправки
 let NT_seq    = 0;            // счётчик пакетов move
 let NT_respAcc = 9;           // сколько прошло с прошлой заявки на респавн
+/* Ствол, о котором сервер УЖЕ знает (−1 — ещё не говорили). Выбор оружия
+   живёт в брифинге, то есть случается ПОСЛЕ hello, а сервер по нему выбирает
+   всю таблицу боеприпасов. Значит расхождение обязано жить не дольше кадра. */
+let NT_myW    = -1;
 
 /* Кредиты заявок — защита от флуда «снизу», по смыслу игры (см. §6.6):
    попадание нельзя заявить, не выстрелив; площадь — не выстрелив фугасом. */
@@ -250,6 +261,44 @@ function NT_foe(id){
   return !p || p.team !== NET.team;
 }
 
+/* Ствол в протоколе — число 0/1 (§9.6). Мусор и отсутствие поля разводим:
+   −1 значит «не сказали», и тогда прежнее значение трогать нельзя. */
+function NT_wOf(rec){
+  if(!rec || rec.w === undefined || rec.w === null) return -1;
+  return ((rec.w | 0) === 1) ? 1 : 0;
+}
+/* Таблица боеприпасов ТОГО, КТО СТРЕЛЯЛ. Своя AMMO здесь не годится: у лука
+   и винтовки под одним индексом лежат разные строки, и чужую заявку (урон
+   боту у хоста) или чужой трассер надо мерить его оружием, а не своим. */
+function NT_ammoOf(id, ai){
+  const p = NET.players.get(id);
+  const w = p ? (p.w | 0) : -1;
+  const list = (w === 0 || w === 1) ? WPNS[w].ammo : AMMO;
+  const i = (ai | 0) % list.length;
+  return list[i < 0 ? 0 : i] || list[0];
+}
+
+/* Модель чужого бойца ведёт 94_netplayers.js — ствол в ней рисует его агент,
+   наше дело доставить факт. Зовём его метод, если он есть; если сборка ещё
+   без него, ствол всё равно лежит в NET.players[id].w (его кладёт вызывающий)
+   и в userData реплики — оттуда его прочтёт любая реализация, а лишнее поле
+   в userData никому не мешает. Молчим при любой ошибке: картинка не повод
+   ронять сеть. */
+function NT_netpW(id, w){
+  if(id === NET.id) return;
+  const NP = NT_netp();
+  if(!NP) return;
+  try{
+    if(typeof NP.setWeapon === 'function'){ NP.setWeapon(id, w); return; }
+    if(typeof NP.weapon === 'function'){ NP.weapon(id, w); return; }
+    const E = (typeof NP.get === 'function') ? NP.get(id) : null;
+    if(!E) return;
+    E.w = w;
+    const m = E.v && E.v.m;
+    if(m && m.userData) m.userData.wpn = w;
+  }catch(e){}
+}
+
 /* Индекс боеприпаса ЗАЯВКИ (§9.3). Он приходит от пули, а не из wpn.idx:
    пояс переключается мгновенно, а пуля летит до полусекунды, и сервер ищет
    под заявку тот самый выстрел. Здесь только защита от мусора: если индекс не
@@ -338,13 +387,21 @@ function NT_botSlot(i){
 function NT_ensure(id, name, team, rec){
   let p = NET.players.get(id);
   if(!p){
+    const w0 = NT_wOf(rec);
     p = { id:id, name:NT_nick(name), team:team|0,
           hp:100, alive:true, kills:0, deaths:0,
+          /* Ствол бойца: 0 винтовка, 1 лук (§9.6). Пока не сказали — винтовка:
+             ошибка в эту сторону всего лишь рисует не ту модель, а вот
+             отсутствие поля пришлось бы проверять во всех читателях. */
+          w:(w0 < 0) ? 0 : w0,
           buf:[], ent:null,                       // буфер и модель наполняет NETP
           x:0, y:0, z:0, yaw:0, pitch:0, h:CFG.height, f:0 };
     NET.players.set(id, p);
     const NP = NT_netp();
-    if(NP && id !== NET.id) NP.ensure(id, p.team, p.name);
+    /* Четвёртым аргументом отдаём ствол: сборка без его поддержки лишний
+       аргумент просто не заметит, а с поддержкой — соберёт сразу нужную
+       модель, без пересборки на первом же снапшоте. */
+    if(NP && id !== NET.id){ NP.ensure(id, p.team, p.name, p.w); NT_netpW(id, p.w); }
   } else {
     if(name !== undefined && name !== null) p.name = NT_nick(name);
     /* Команду сервер может уточнить позже (запись snap несёт tm, §9.5), и это
@@ -355,9 +412,14 @@ function NT_ensure(id, name, team, rec){
       if(t !== p.team){
         p.team = t;
         const NP = NT_netp();
-        if(NP && id !== NET.id) NP.ensure(id, t, p.name);
+        // модель пересобирается под цвет команды — ствол ей назовём заново
+        if(NP && id !== NET.id){ NP.ensure(id, t, p.name, p.w); NT_netpW(id, p.w); }
       }
     }
+    /* Смена ствола посреди сессии — это новый матч у того клиента: он вышел
+       в брифинг и выбрал другое оружие. Реплике об этом надо сказать. */
+    const w1 = NT_wOf(rec);
+    if(w1 >= 0 && w1 !== p.w){ p.w = w1; NT_netpW(id, w1); }
   }
   if(rec){
     if(typeof rec.hp === 'number') p.hp = rec.hp;
@@ -421,6 +483,7 @@ function NT_clearState(){
   NT_ended = false;
   NT_acc = 0; NT_seq = 0; NT_respAcc = 9;
   NT_cShot = 0; NT_cSplash = 0; NT_cBoom = 0;
+  NT_myW = -1;                  // новому серверу свой ствол называем заново
   NT_secN = 0; NT_secClaim = 0;
   NT_selfAcc.fill(0); NT_selfAt.fill(-1e9);
   NT_ckReset();
@@ -482,6 +545,11 @@ function NT_onMessage(ev){
         if(it) NT_ensure(it.id, it.name, it.team, it);
       }
     if(!NET.players.has(NET.id)) NT_ensure(NET.id, NET.name, NET.team);
+    /* Свой ствол сервер уже знает из hello, но в списке welcome нас может не
+       быть (комната собрала его до нашей записи). Держим значение и у себя:
+       интерфейс и киллфид не должны гадать, кто чем играет. */
+    const me0 = NET.players.get(NET.id);
+    if(me0) me0.w = (NT_myW >= 0) ? NT_myW : (game.weapon|0);
     NT_recount();
     NT_ckReset(); NT_clock(m.k);
     NET.on = true;
@@ -515,6 +583,11 @@ function NT_onMessage(ev){
         p.yaw = e.yaw; p.pitch = e.pitch;
         p.h = (e.h > 0) ? e.h : CFG.height;
         p.f = e.f|0;
+        /* w — ствол бойца (§9.6). Приходит каждым снапшотом, но реплике
+           говорим только про СМЕНУ: пересобирать модель 20 раз в секунду
+           значит выбрасывать её же обратно. */
+        const w = NT_wOf(e);
+        if(w >= 0 && w !== p.w){ p.w = w; NT_netpW(e.i, w); }
         if(typeof e.hp === 'number') p.hp = e.hp;
         if(e.a !== undefined) p.alive = !!e.a;
       }
@@ -544,10 +617,19 @@ function NT_onMessage(ev){
        проверяем здесь: иначе один пакет выносит бота с любого расстояния. */
     const ai = NT_ammo(m.a);
     const part = (m.p === 'head' || m.p === 'splash' || m.p === 'burn') ? m.p : 'body';
-    const cap = (part === 'splash' ? (AMMO[ai].splashMax || AMMO[ai].dmgMax)
-               : part === 'burn'   ? ((AMMO[ai].burnTime*AMMO[ai].burnDps) || AMMO[ai].dmgMax)
-               : part === 'head'   ? AMMO[ai].dmgMax*2.2
-               : AMMO[ai].dmgMax) * 1.06;
+    /* Потолок берём из таблицы СТРЕЛЯВШЕГО, а не из своей: хост может держать
+       винтовку, а заявка прилететь от лучника — и наоборот. Оружие стрелка мы
+       знаем из его записи в NET.players (§9.6). */
+    const A = NT_ammoOf(m.i, ai);
+    /* Голову считаем ТОЙ ЖЕ WPN_headDamage(), которой считал стрелок. Своя
+       формула здесь была ошибкой: полный крит матчевого (и «обычного» типа
+       вообще) равен 999, а потолок dmgMax×2.2 давал 198 — и честный хедшот
+       по боту от не-хоста молча пропадал. */
+    const hd = (typeof WPN_headDamage === 'function') ? WPN_headDamage(A, A.dmgMax) : A.dmgMax*2.2;
+    const cap = (part === 'splash' ? (A.splashMax || A.dmgMax)
+               : part === 'burn'   ? ((A.burnTime*A.burnDps) || A.dmgMax)
+               : part === 'head'   ? ((hd > 0) ? hd : A.dmgMax)
+               : A.dmgMax) * 1.06;
     if(d > cap) break;
     /* Поджог — не удар: его надо копить, а не снимать разом. Ветка нужна тем,
        кто не хост: у них реплики ботов не тикают, и гореть заочно некому. */
@@ -642,7 +724,9 @@ function NT_onMessage(ev){
   }
 
   case 'join': {
-    const p = NT_ensure(m.id, m.name, m.team);
+    /* Само сообщение и есть запись о бойце: из него берётся ствол (§9.6),
+       а полей здоровья и счёта в нём нет — NT_ensure их просто не увидит. */
+    const p = NT_ensure(m.id, m.name, m.team, m);
     NT_recount();
     NT_uiPlayers();
     addFeed('<span class="' + NT_teamCls(p.team) + '">' + p.name + '</span> <span class="w">ПОДКЛЮЧИЛСЯ</span>');
@@ -778,7 +862,8 @@ function NT_remoteShot(m){
             +m.dx || 0, +m.dy || 0, +m.dz || 0, +m.c || 0);
     return;
   }
-  const a = AMMO[(m.a|0) % AMMO.length] || AMMO[0];
+  // трассер и звук — по таблице СТРЕЛЯВШЕГО: стрела летит иначе, чем пуля
+  const a = NT_ammoOf(m.i, m.a);
   NT_v1.set(+m.ox || 0, +m.oy || 0, +m.oz || 0);
   NT_v2.set(+m.dx || 0, +m.dy || 0, +m.dz || 0);
   if(NT_v2.lengthSq() < 1e-8) return;
@@ -799,6 +884,10 @@ function NT_remoteShot(m){
    splashDamage() тогда возвращает ноль для всех, и ни бот, ни игрок урона не
    получают, а вспышка, дым, воронка, звук и тряска остаются ровно теми же,
    что у своего фугаса. Свой урон нам всё равно пришлёт сервер отдельным dmg. */
+/* Стрелка в 'boom' протокол не называет (§3): пакет ретранслируется ради
+   картинки, и радиус берётся из СВОЕЙ таблицы. Разница между фугасом и
+   взрывной стрелой тут в четверть метра, а урон этот вызов всё равно не
+   наносит — заводить ради этого лишнее поле в кадре незачем. */
 function NT_remoteBoom(m){
   const ai = (m.a|0);
   const a = AMMO[ai % AMMO.length] || AMMO[1];
@@ -898,6 +987,10 @@ const NET = {
     return proto + host;
   },
   botState(code){ return NT_BOT_ST[code|0] || 'hold'; },
+  /* Ствол бойца по id: 0 винтовка, 1 лук (§9.6). Отдельная дверь для тех,
+     кому оружие нужно для картинки (модель реплики, табло): лазить в записи
+     players руками ради одного поля незачем. Неизвестный боец — винтовка. */
+  wpnOf(id){ const p = NET.players.get(id); return p ? (p.w|0) : 0; },
 
   /* -------------------------- ПОДКЛЮЧЕНИЕ -------------------------- */
   connect(url, name){
@@ -957,7 +1050,10 @@ const NET = {
       ws.onopen = ()=>{
         if(gen !== NT_gen) return;
         NT_lastRx = performance.now();
-        NET.send({ t:'hello', name:nick, ver:NT_VER });
+        /* Ствол называем сразу: по нему сервер выбирает таблицу боеприпасов,
+           а первый выстрел может случиться раньше, чем мы успеем передумать. */
+        NT_myW = game.weapon|0;
+        NET.send({ t:'hello', name:nick, ver:NT_VER, w:NT_myW });
       };
       ws.onmessage = ev=>{ if(gen === NT_gen) NT_onMessage(ev); };
       // onerror в браузере намеренно не раскрывает причину — говорим общее
@@ -997,6 +1093,18 @@ const NET = {
   /* -------------------------- КАДР -------------------------- */
   update(dt){
     if(NET.on !== true) return;
+
+    /* Смена ствола (§9.6). Оружие выбирают в брифинге — то есть уже после
+       hello, — а сервер по нему выбирает таблицу, по которой судит урон и
+       темп. Пока он не знает про лук, честные заявки лучника будут ломиться
+       в винтовочные потолки. Повторный hello сессию не пересоздаёт; если
+       пакет не пролез в бюджет, попробуем в следующем кадре. */
+    const w = game.weapon|0;
+    if(w !== NT_myW && NET.send({ t:'hello', name:NET.name, ver:NT_VER, w:w })){
+      NT_myW = w;
+      const me = NET.players.get(NET.id);
+      if(me) me.w = w;
+    }
 
     // часы: подводим оценку серверного времени, не дёргая её рывками
     if(NT_ckReady){
@@ -1041,6 +1149,12 @@ const NET = {
      Всё ниже — «я видел вот это», а не «применить вот это». Проверяет и
      применяет сервер; наша задача — не завалить его мусором. */
 
+  /* chg — заряд выстрела 0..1. У винтовки это выцеливание, у лука — НАТЯГ, и
+     для лука число перестало быть косметикой: сервер считает по нему
+     минимальный интервал между выстрелами (наложить стрелу + натянуть на
+     столько, на сколько заявлено). Недотянутый выстрел уходит раньше — и
+     обязан стоить меньше времени, иначе честная скорая стрельба отклонялась
+     бы как невозможная. */
   reportShot(ammoIdx, origin, dir, chg){
     if(NET.on !== true) return;
     const a = ammoIdx|0;

@@ -26,7 +26,12 @@ const wpn = {
   bloom:0, rec:0, yawRec:0,
   kick:0, kickV:0, kickX:0, kickXV:0, boltAnim:0, ejected:true,
   swayX:0, swayY:0, hold:false, breathT:0,
-  heat:0, flashT:0, flashS:0.5
+  heat:0, flashT:0, flashS:0.5,
+  /* ЛУК. draw — натяг 0..1, drawing — ЛКМ зажата (тянем), drawT — сколько
+     секунд держим УЖЕ ПОЛНЫЙ натяг: с него начинается дрожь. Поля объявлены
+     в общем литерале и на винтовке всегда лежат нулями: заводить их на
+     горячем пути значило бы менять форму объекта посреди боя. */
+  draw:0, drawing:false, drawT:0, creakT:0
 };
 const wind = { x:0, z:0, mag:0, dir:0 };
 const game = {
@@ -37,9 +42,40 @@ const game = {
      игрока, команда ботов (противоположная) и цвета в интерфейсе. В сети его
      назначает сервер и кладёт сюда же — чтобы читателю не приходилось знать,
      сетевой мы сейчас или нет. */
-  team:0
+  team:0,
+  /* Выбранный ствол: 0 = винтовка, 1 = лук (см. WPNS в 10_core.js).
+     Само переключение делает setWeapon() в startGame — он подменяет
+     содержимое AMMO на месте, поэтому здесь хранится только выбор. */
+  weapon:0
 };
 let D = DIFFS.normal;
+
+/* ============================ ЛУК: НАТЯГ ============================
+
+   Чем стреляем ПРЯМО СЕЙЧАС — знает сам боекомплект, а не game.weapon.
+   setWeapon() подменяет содержимое AMMO на месте, и все стрелы помечены
+   полем arrow; game.weapon — это лишь выбор в брифинге, и между матчами
+   он может уже смениться, пока в стволе ещё прежний боеприпас. Поэтому
+   единственный источник правды здесь — AMMO.
+
+   Числа натяга собраны в одном месте не ради красоты: они связаны между
+   собой. Ниже min натяга выстрела нет вовсе (стрела срывается с пальцев
+   под ноги), от min до упора линейно растут скорость и урон, а разброс
+   падает квадратично — недотянутый лук должен ощущаться не «чуть хуже»,
+   а откровенно негодным. holdFree — сколько полный натяг держится даром;
+   дальше руки устают ровно той же выносливостью, что и задержка дыхания
+   у винтовки, и swayAmp() разводит марку в стороны. */
+const BOW = {
+  min: 0.20,        // ниже — срыв: стрела просто падает под ноги
+  vMin: 0.45,       // доля от a.v на нулевом натяге (реально не ниже 0.56)
+  spreadK: 3.6,     // во сколько раз хуже разброс при нулевом натяге
+  holdFree: 1.0,    // секунд полного натяга без усталости
+  stamDrain: 0.85,  // выносливость на удержании, единиц в секунду
+  zoom: 9.0,        // на сколько градусов сужается поле зрения при полном натяге
+  dudV: 0.22        // с какой долей скорости уходит сорвавшаяся стрела
+};
+function curWeapon(){ return (AMMO[0] && AMMO[0].arrow === true) ? WPNS[1] : WPNS[0]; }
+function isBow(){ return curWeapon().bow === true; }
 
 const _t1=new THREE.Vector3(), _t2=new THREE.Vector3(), _t3=new THREE.Vector3(), _t4=new THREE.Vector3();
 const _hit=new THREE.Vector3(), _nrm=new THREE.Vector3(), _mz=new THREE.Vector3();
@@ -103,13 +139,28 @@ const WPN_RECOIL = {
   frag: { kick:7.8, kickX:2.8, pitch:1.90, yaw:0.60, shake:0.30, bloom:2.30, heat:0.40,
           flash:0.86, smoke:10, spark:5, ember:0 },
   fire: { kick:6.1, kickX:1.9, pitch:1.45, yaw:0.42, shake:0.19, bloom:1.85, heat:0.62,
-          flash:0.70, smoke:4, spark:2, ember:7 }
+          flash:0.70, smoke:4, spark:2, ember:7 },
+  /* Лук не бьёт в плечо — он щёлкает тетивой. Отдача здесь нужна только
+     чтобы выстрел читался телом: ствол дёргается вчетверо слабее винтовки,
+     дульной вспышки и дыма нет вовсе (flash/smoke/spark нули не случайны). */
+  arrow:{ kick:2.1, kickX:0.5, pitch:0.40, yaw:0.10, shake:0.05, bloom:0.55, heat:0,
+          flash:0, smoke:0, spark:0, ember:0 },
+  bomb: { kick:3.0, kickX:0.8, pitch:0.58, yaw:0.16, shake:0.09, bloom:0.80, heat:0,
+          flash:0, smoke:0, spark:0, ember:0 },
+  flame:{ kick:2.4, kickX:0.6, pitch:0.46, yaw:0.12, shake:0.07, bloom:0.65, heat:0,
+          flash:0, smoke:0, spark:0, ember:5 }
 };
 /* Цвет остаточного дыма у дула: у зажигательного он тёплый и держится дольше. */
 const WPN_SMOKE_COL = { match:0x8d8880, frag:0x615c57, fire:0xa8785c };
 
 /* оружие от первого лица */
 let vmRoot, vmRifle, vmFlash, vmHandL;
+/* Лук живёт рядом с винтовкой отдельным узлом и просто прячется, когда
+   выбран не он: пересобирать модель на каждый матч дороже, чем держать
+   в памяти полтора десятка коробок. Узлы натяга лежат в userData —
+   87_weapon_update.js двигает их каждый кадр и ничего не знает о сборке. */
+let vmBow = null;
+const WPN_vmArrows = [];      // наложенная стрела на каждый вид, по индексу пояса
 let WPN_flashCore = null;      // яркое ядро вспышки поверх спрайта
 let WPN_vmLight = null;        // подсветка модели в момент выстрела
 const WPN_smoke = [];          // дым, ползущий из ствола, пока он горячий
@@ -153,6 +204,67 @@ function buildViewmodel(){
     s.scale.setScalar(0.12); s.visible = false; s.userData.t = i/3;
     vmScene.add(s); WPN_smoke.push(s);
   }
+
+  vmBow = WPN_buildBow();
+  vmBow.scale.setScalar(0.92);
+  vmBow.visible = false;
+  vmRoot.add(vmBow);
+
+  /* Наложенная стрела висит на точке наложения и уезжает назад вместе с
+     тетивой сама — узел двигает draw(t). Делаем по одной на вид и просто
+     переключаем видимость: пересобирать модель при смене типа было бы
+     единственной аллокацией на горячем пути смены пояса. */
+  const nk = vmBow.userData ? vmBow.userData.nock : null;
+  if(nk) for(let i=0;i<AMMO.length;i++){
+    const g = WPN_arrowMesh(BOW_AMMO[i] || AMMO[i]);
+    const L = (g.userData && g.userData.len) || WPN_ARROW_LEN;
+    g.position.set(0, 0, -L);      // хвостовик ложится ровно на тетиву
+    g.visible = false;
+    nk.add(g);
+    WPN_vmArrows.push(g);
+  }
+}
+
+/* Лук от первого лица. Модель отдаёт 50_models.js: у неё те же локальные
+   оси, что у винтовки (ствол/стрела уходят в -Z), и вся тригонометрия
+   натяга спрятана в userData.draw(t). Если модуля моделей в сборке нет —
+   собираем заглушку с тем же контрактом, чтобы механика осталась играбельной
+   и её можно было проверить в одиночку. */
+function WPN_buildBow(){
+  if(typeof mkBow === 'function'){
+    try{
+      const g = mkBow(PAL.blu, false);
+      if(g && g.isObject3D && g.userData && typeof g.userData.draw === 'function') return g;
+    }catch(err){}
+  }
+  const G = new THREE.Group();
+  const wood = toon(PAL.wood), horn = toon(PAL.leather), strM = basic(0xd9d3c1);
+  const limbU = new THREE.Group(); limbU.position.set(0, 0.185,-1.0); G.add(limbU);
+  limbU.add(mBox(0.040,0.44,0.05, wood, 0, 0.22, 0.10));
+  const limbD = new THREE.Group(); limbD.position.set(0,-0.185,-1.0); G.add(limbD);
+  limbD.add(mBox(0.040,0.44,0.05, wood, 0,-0.22, 0.10));
+  G.add(mBox(0.052,0.44,0.086, horn, 0, 0.02,-1.005));
+  const string = new THREE.Group(); G.add(string);
+  const sU = new THREE.Group(); sU.add(mBox(0.008,1,0.008, strM, 0,-0.5,0)); string.add(sU);
+  const sD = new THREE.Group(); sD.add(mBox(0.008,1,0.008, strM, 0,-0.5,0)); string.add(sD);
+  const nock = new THREE.Object3D(); nock.position.set(0,0.02,-0.80); G.add(nock);
+  const muzzle = new THREE.Object3D(); muzzle.position.set(0,0.02,-1.02); G.add(muzzle);
+  function draw(t){
+    t = clamp(t,0,1);
+    const a = 0.16*t*t;
+    limbU.rotation.x = a; limbD.rotation.x = -a;
+    const ty = 0.02+0.185+0.435*Math.cos(a), tz = -1.0+0.435*Math.sin(a)+0.20;
+    const nz = -0.80 + 0.34*t;
+    nock.position.z = nz;
+    const dy = 0.02-ty, dz = nz-tz, l = Math.hypot(dy,dz);
+    sU.position.set(0,ty,tz);      sU.rotation.x = Math.atan2(-dz,-dy); sU.scale.y = l;
+    sD.position.set(0,0.04-ty,tz); sD.rotation.x = Math.atan2(-dz, dy); sD.scale.y = l;
+    return t;
+  }
+  draw(0);
+  G.userData = { string, stringU:sU, stringD:sD, nock, muzzle, limbU, limbD, draw,
+                 pull:0.34, brace:-0.80, axis:0.02, arrowLen:WPN_ARROW_LEN };
+  return G;
 }
 
 function A(){ return AMMO[wpn.idx]; }
@@ -166,9 +278,26 @@ function currentSpreadDeg(){
   if(player.slideT > 0) s += 1.2;      // из подката прицельно не постреляешь
   if(player.mantleT > 0) s += 2.5;     // на уступе руки заняты
   s += wpn.bloom + wpn.heat*0.12;      // разогретый ствол «дышит»
+  /* Лук: точность живёт не в стойке, а в натяге. Квадрат недотяга — чтобы
+     последняя четверть хода тетивы решала больше, чем первая половина.
+     В покое показываем разброс полного натяга: марка это обещание «куда
+     уйдёт стрела, если дотянуть», и она СХОДИТСЯ по мере натяга. */
+  if(a.arrow === true){
+    const d = (wpn.drawing || wpn.draw > 0) ? wpn.draw : 1;
+    s *= 1 + (1-d)*(1-d)*BOW.spreadK;
+  }
   return Math.max(0, s);
 }
 function swayAmp(){
+  /* Лук ведёт марку сам, без оптики: чем дольше держишь полный натяг, тем
+     сильнее ходят руки. Считаем по той же выносливости, что тратит задержка
+     дыхания, — усталость в игре одна на все стволы. */
+  if(A().arrow === true){
+    if(wpn.draw <= 0.01) return 0;
+    const tired = 1 - player.stam;
+    const held = clamp((wpn.drawT - BOW.holdFree)/2.0, 0, 1);
+    return (0.12 + tired*0.38 + held*0.50) * wpn.draw;
+  }
   if(wpn.sT < 0.5) return 0;
   const tired = 1 - player.stam;
   let a = 0.10 + tired*0.42;
@@ -191,10 +320,14 @@ function WPN_muzzleWorld(out){
   WPN_v3.set(0,1,0);
   WPN_v4.crossVectors(WPN_v2, WPN_v3).normalize();
   WPN_v3.crossVectors(WPN_v4, WPN_v2).normalize();
+  /* Насколько оружие уведено от оси взгляда. У винтовки это уход в оптику,
+     у лука — натяг: и там, и там оружие идёт к лицу и точка схода сходится
+     к центру экрана. Иначе угли огненной стрелы сыпались бы сбоку от неё. */
+  const off = 1 - (A().arrow === true ? wpn.draw : wpn.sT);
   return out.copy(camera.position)
             .addScaledVector(WPN_v2, 1.05)
-            .addScaledVector(WPN_v4, 0.15*(1-wpn.sT))
-            .addScaledVector(WPN_v3, -0.10*(1-wpn.sT));
+            .addScaledVector(WPN_v4, 0.15*off)
+            .addScaledVector(WPN_v3, -0.10*off);
 }
 
 function WPN_shotFx(a, chg){
@@ -246,8 +379,130 @@ function WPN_shotFx(a, chg){
   SFX.noise({dur:0.05, f:1700, q:4, g:0.09, delay:0.03});     // лязг механики поверх выстрела
 }
 
+/* Конус разброса вокруг направления. Вынесен из tryFire() только затем,
+   чтобы лук и винтовка расходились в цифрах, а не в математике: порядок
+   обращений к генератору здесь ровно прежний. */
+function WPN_spreadDir(dir, sd){
+  if(!(sd > 0)) return dir;
+  const ang = rnd(0,Math.PI*2), rad = Math.sqrt(Math.random())*sd;
+  const up = _t1.set(0,1,0), rt = _t2.crossVectors(dir, up).normalize();
+  const u2 = _t3.crossVectors(rt, dir).normalize();
+  return dir.addScaledVector(rt, Math.tan(rad)*Math.cos(ang))
+            .addScaledVector(u2, Math.tan(rad)*Math.sin(ang)).normalize();
+}
+
+/* -------------------------- ВЫСТРЕЛ ИЗ ЛУКА --------------------------
+   Отдача у лука не «выстрел», а щелчок тетивы: ни вспышки, ни дыма, ни
+   гильзы. Огненная стрела — исключение: угли с наконечника видно, и они
+   на секунду подсвечивают руки. */
+function WPN_bowFx(a, d, dud){
+  const R = WPN_RECOIL[a.id] || WPN_RECOIL.arrow;
+  const k = dud ? 0.25 : (0.45 + 0.55*d);
+  wpn.kickV += R.kick*k;
+  wpn.kickXV += rnd(-R.kickX, R.kickX)*k;
+  wpn.bloom += R.bloom*k;
+  wpn.rec += R.pitch*Math.PI/180*k;
+  const yk = rnd(-R.yaw, R.yaw)*Math.PI/180*k;
+  player.yaw += yk; wpn.yawRec += yk;      // увод; сведение — в updateWeapon
+  shake(R.shake*k);
+
+  // тетива бьёт по наручу, оперение шелестит о полку
+  SFX.tone({f: dud?140:250, f2:64, dur:0.17, type:'triangle', g:0.26*k});
+  SFX.noise({dur:0.10, f:1750, f2:520, q:1.2, g:0.20*k});
+  SFX.noise({dur:0.34, f:820, f2:280, q:0.8, g:0.07*k, delay:0.03});
+  if(!dud) SFX.tone({f:560, f2:190, dur:0.22, type:'sine', g:0.07*k, delay:0.02});
+
+  if(!dud && R.ember){
+    const mz = WPN_muzzleWorld(WPN_v1);
+    if(FX.magic) FX.magic(mz, R.ember, PAL.ember);
+    else FX.burst(mz, R.ember, {mat:PMAT.fire, speed:3.0, life:0.45, size:0.06, s1:0.01, g:-1.4});
+    if(typeof LIGHTS !== 'undefined' && LIGHTS.flash) LIGHTS.flash(mz, a.col, 3, 8, 0.10);
+  }
+}
+
+/* Спустить тетиву. Отдельная функция, потому что путей сюда три: отпускание
+   ЛКМ (обычная игра), прямой вызов tryFire() (тесты и скрипты) и смерть с
+   зажатой кнопкой — а списание стрелы, откат и заявка в сеть должны быть
+   ровно одни и те же. */
+function WPN_loose(){
+  const a = A();
+  if(wpn.rel>0 || wpn.bolt>0) return;          // стрела ещё не на тетиве
+  if(wpn.cd[wpn.idx] > 0) return;
+  if(wpn.loaded[wpn.idx] <= 0){ SFX.dry(); startReload(); return; }
+
+  const d = clamp(wpn.draw, 0, 1);
+  /* СРЫВ. Ниже порога тетива уходит из пальцев сама: стрела теряется, но
+     ни взрыва, ни поджога не будет — это промах игрока, а не мина под ноги.
+     Стрелу всё равно списываем и откат ставим: правило одно на все выстрелы,
+     иначе «щёлкать вхолостую» стало бы выгоднее, чем целиться. */
+  const dud = d < BOW.min;
+
+  wpn.loaded[wpn.idx]--;
+  game.shots++;
+  const dmg = dud ? a.dmgMin*0.15 : lerp(a.dmgMin, a.dmgMax, d);
+
+  camera.getWorldDirection(_fwd);
+  if(dud){ _fwd.y -= 1.25; _fwd.normalize(); }   // уходит под ноги
+  WPN_spreadDir(_fwd, currentSpreadDeg()*Math.PI/180);
+
+  const b = spawnBullet(camera.position, _fwd, a, dmg, 'player', d);
+  // натяг решает скорость: недотянутая стрела и летит медленнее, и падает раньше
+  b.vel.multiplyScalar(dud ? BOW.dudV : lerp(BOW.vMin, 1, d));
+  b.dud = dud;
+  if(NET_ACTIVE) NET.reportShot(wpn.idx, camera.position, _fwd, d);
+
+  wpn.cd[wpn.idx] = a.cd;
+  wpn.charge = 0;
+  wpn.bolt = a.bolt;                        // время наложить следующую стрелу
+  wpn.boltAnim = 0;
+  wpn.ejected = true; WPN_ejectArm = false; // у лука гильз не бывает
+  WPN_bowFx(a, d, dud);
+  if(a.cd > 0) WPN_status('cd', WPN_cdTxt(a, a.cd), '#e08a4a');
+}
+
+/* ---------------------------- ВВОД ОГНЯ ----------------------------
+   Ввод живёт в 90_game.js, а знание «как оружие реагирует на кнопку» —
+   здесь. Наружу торчат ровно две функции: fireDown() на mousedown и
+   fireUp() на mouseup (а заодно на blur и потерю захвата мыши).
+   У винтовки fireDown() — это прежний tryFire(), а fireUp() пустой. */
+function fireDown(){
+  if(game.state!=='play' || !player.alive){ wpn.drawing = false; return; }
+  if(!isBow()){ tryFire(); return; }
+  const a = A();
+  if(wpn.cd[wpn.idx] > 0){                  // тип на откате — тянуть нечего
+    if(WPN_blockT <= 0){ SFX.blocked(); WPN_blockT = 0.22; }
+    WPN_status('cd', WPN_cdTxt(a, wpn.cd[wpn.idx]), '#e08a4a');
+    return;
+  }
+  if(wpn.loaded[wpn.idx] <= 0){ SFX.dry(); startReload(); return; }
+  /* Тянуть разрешаем и пока стрела ложится на тетиву: игрок держит кнопку,
+     натяг начнётся сам, как только оружие будет готово. Иначе нажатие в
+     конце наложения пропадало бы, и это читалось бы как потерянный клик. */
+  wpn.drawing = true;
+}
+function fireUp(){
+  if(!wpn.drawing) return;
+  wpn.drawing = false;
+  if(isBow() && game.state==='play' && player.alive) WPN_loose();
+  wpn.draw = 0; wpn.drawT = 0;
+}
+/* ПКМ. У лука оптики нет — и звука открывающегося прицела тоже быть не
+   должно, иначе игрок будет думать, что она сломалась. Флаг всё равно
+   гасится каждый кадр в updateWeapon, но правильное место для решения
+   «оружие не умеет целиться» — здесь, а не в обработчике мыши. */
+function toggleScope(){
+  if(game.state!=='play') return;
+  if(isBow()){ wpn.scoped = false; return; }
+  wpn.scoped = !wpn.scoped;
+  SFX[wpn.scoped ? 'scopeIn' : 'scopeOut']();
+}
+
 function tryFire(){
   if(game.state!=='play' || !player.alive) return;
+  /* Лук стреляет отпусканием, а не нажатием. Сюда он попадает только прямым
+     вызовом (тесты, отладка, чужой код) — пускаем стрелу с тем натягом,
+     который есть на этот момент, вплоть до срыва. */
+  if(isBow()){ WPN_loose(); wpn.drawing = false; wpn.draw = 0; wpn.drawT = 0; return; }
   const a = A();
   /* Откат типа — главный ограничитель темпа: он проверяется раньше всего,
      чтобы игрок всегда понимал, что мешает именно выбранный боеприпас. */
@@ -266,13 +521,7 @@ function tryFire(){
   const dmg = lerp(a.dmgMin, a.dmgMax, chg);
 
   camera.getWorldDirection(_fwd);
-  const sd = currentSpreadDeg()*Math.PI/180;
-  if(sd>0){
-    const ang = rnd(0,Math.PI*2), rad = Math.sqrt(Math.random())*sd;
-    const up = _t1.set(0,1,0), rt = _t2.crossVectors(_fwd, up).normalize();
-    const u2 = _t3.crossVectors(rt, _fwd).normalize();
-    _fwd.addScaledVector(rt, Math.tan(rad)*Math.cos(ang)).addScaledVector(u2, Math.tan(rad)*Math.sin(ang)).normalize();
-  }
+  WPN_spreadDir(_fwd, currentSpreadDeg()*Math.PI/180);
   spawnBullet(camera.position, _fwd, a, dmg, 'player', chg);
   // остальным нужен наш выстрел для трассера и звука — попадание считаем мы сами
   if(NET_ACTIVE) NET.reportShot(wpn.idx, camera.position, _fwd, chg);
@@ -290,7 +539,10 @@ function startReload(){
   wpn.rel = wpn.relTotal = a.reload;
   wpn.relStage = 0;
   wpn.charge = 0;
-  SFX.reloadS();
+  // тетиву при этом отпускают: держать натяг, набивая колчан, невозможно
+  wpn.draw = 0; wpn.drawT = 0;
+  if(a.arrow === true) SFX.noise({dur:0.11, f:700, f2:380, q:1.4, g:0.15});
+  else SFX.reloadS();
 }
 function finishReload(){
   const a = A();
@@ -303,7 +555,10 @@ function switchAmmo(i){
   if(i===wpn.idx || wpn.rel>0) return;
   wpn.idx = i; wpn.charge = 0; wpn.bolt = Math.max(wpn.bolt, 0.45);
   wpn.boltAnim = 0; wpn.ejected = true; WPN_ejectArm = false;   // смена пояса — не выстрел, гильзе взяться неоткуда
-  SFX.bolt();
+  // натяг снимается: другую стрелу на уже натянутую тетиву не положишь
+  wpn.draw = 0; wpn.drawT = 0;
+  if(AMMO[i] && AMMO[i].arrow === true) SFX.noise({dur:0.07, f:1500, q:3, g:0.11});
+  else SFX.bolt();
   // сразу показать, готов ли новый тип: пояс общий, откаты у типов свои
   const a = AMMO[i];
   if(wpn.cd[i] > 0) WPN_status('cd', WPN_cdTxt(a, wpn.cd[i]), '#e08a4a');
@@ -383,10 +638,60 @@ function WPN_updateBarrelSmoke(dt){
 /* ------------------------------ ПУЛИ ------------------------------ */
 const bullets = [];
 const WPN_BGEO = new THREE.BoxGeometry(0.05,0.05,0.75);
+/* СТРЕЛА КАК ОБЪЕКТ. Остриё лежит в НАЧАЛЕ КООРДИНАТ и смотрит в −Z:
+   именно туда Object3D.lookAt() разворачивает объект (его матрица кладёт
+   +Z в «от цели к глазу»). Соглашение не наше, а модуля моделей, и оно
+   удобно вдвойне: позиция пули и есть остриё, поэтому и наведение по
+   вектору скорости, и «воткнуть в стену» пишутся без поправок на длину. */
+const WPN_ARROW_LEN = 0.56;
+let WPN_AGEO = null;                 // геометрия запасной стрелы, если моделей нет
+function WPN_arrowFallbackGeo(){
+  if(WPN_AGEO) return WPN_AGEO;
+  const shaft = new THREE.CylinderGeometry(0.009,0.008,0.44,6);
+  shaft.rotateX(Math.PI/2); shaft.translate(0,0,0.28);
+  const head = new THREE.ConeGeometry(0.014,0.058,4);
+  head.rotateX(Math.PI/2); head.translate(0,0,0.029);
+  const vane = new THREE.BoxGeometry(0.0035,0.052,0.085);
+  vane.translate(0,0.028,0.458);
+  WPN_AGEO = { shaft, head, vane };
+  return WPN_AGEO;
+}
+/* Визуал одной стрелы. Просим модель у 50_models.js: там она склеена в
+   один-два меша и знает про свой вид (бодкин, горшок, пакля). Заглушка
+   нужна только чтобы модуль оружия можно было проверить в одиночку. */
+function WPN_arrowMesh(a){
+  if(typeof mkArrow === 'function'){
+    try{
+      const g = mkArrow(a.id);
+      if(g && g.isObject3D) return g;
+    }catch(err){}
+  }
+  const G = WPN_arrowFallbackGeo();
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(G.shaft, toon(0x8a6236)));
+  g.add(new THREE.Mesh(G.head,  basic(a.col)));
+  for(let i=0;i<3;i++){
+    const v = new THREE.Mesh(G.vane, toon(a.trail));
+    v.rotation.z = i*2.0944;
+    g.add(v);
+  }
+  g.userData = { kind:a.id, len:WPN_ARROW_LEN, glow:null };
+  return g;
+}
+
 const WPN_MATS = {};        // материалы следа, по одному на тип патрона
 const WPN_visAll = [];      // все созданные визуалы пуль
-const WPN_visPool = [];     // из них свободные
+const WPN_visPool = [];     // из них свободные (пули)
+/* Стрелы держим по пулу НА ВИД: у бодкина, глиняного горшка и пакли разная
+   геометрия, и подменить её на готовом меше нельзя — только материал. */
+const WPN_arrowPools = {};
 let WPN_visBusy = 0;
+function WPN_poolOf(v){
+  if(!v.arrow) return WPN_visPool;
+  let p = WPN_arrowPools[v.kind];
+  if(!p) p = WPN_arrowPools[v.kind] = [];
+  return p;
+}
 function WPN_matFor(a){
   let m = WPN_MATS[a.id];
   if(!m){
@@ -399,35 +704,103 @@ function WPN_matFor(a){
 }
 function WPN_visGet(a){
   const mm = WPN_matFor(a);
-  let v = WPN_visPool.pop();
+  const arrow = (a.arrow === true);
+  let pool = WPN_visPool;
+  if(arrow){ pool = WPN_arrowPools[a.id]; if(!pool) pool = WPN_arrowPools[a.id] = []; }
+  let v = pool.pop();
   if(!v){
-    const mesh = new THREE.Mesh(WPN_BGEO, mm.body); mesh.frustumCulled = false;
+    const mesh = arrow ? WPN_arrowMesh(a) : new THREE.Mesh(WPN_BGEO, mm.body);
+    mesh.frustumCulled = false;
     const glow = new THREE.Sprite(mm.glow); glow.frustumCulled = false;
-    v = { mesh, glow };
+    v = { mesh, glow, arrow, kind:a.id };
     WPN_visAll.push(v);
   }
-  v.mesh.material = mm.body; v.glow.material = mm.glow;
+  if(!arrow) v.mesh.material = mm.body;
+  v.glow.material = mm.glow;
   // 90_game.js при рестарте вынимает меши из сцены — возвращаем на место
   if(!v.mesh.parent) scene.add(v.mesh);
   if(!v.glow.parent) scene.add(v.glow);
   v.mesh.visible = true; v.glow.visible = true;
+  v.mesh.scale.setScalar(1);
   WPN_visBusy++;
   return v;
 }
 function WPN_visFree(v){
   if(!v) return;
   v.mesh.visible = false; v.glow.visible = false;
-  WPN_visPool.push(v);
+  WPN_poolOf(v).push(v);
   if(WPN_visBusy>0) WPN_visBusy--;
 }
 function WPN_visReclaim(){
   WPN_visPool.length = 0;
+  for(const k in WPN_arrowPools) WPN_arrowPools[k].length = 0;
   for(let i=0;i<WPN_visAll.length;i++){
     const v = WPN_visAll[i];
     v.mesh.visible = false; v.glow.visible = false;
-    WPN_visPool.push(v);
+    WPN_poolOf(v).push(v);
   }
   WPN_visBusy = 0;
+}
+
+/* ---------------------- ВОТКНУВШИЕСЯ СТРЕЛЫ ----------------------
+   Стрела в стене — не украшение, а память о выстреле: по частоколу стрел
+   вокруг амбразуры видно, откуда по тебе работают. Пул фиксированный,
+   в кадре не создаётся ничего; когда все заняты, забираем самую старую. */
+const WPN_STICK_MAX = 12;
+const WPN_STICK_LIFE = 6.0;
+const WPN_stuck = [];
+const WPN_AX_X = new THREE.Vector3(1,0,0);
+function WPN_stickArrow(a, p, dir){
+  if(typeof scene === 'undefined' || !scene) return;
+  let s = null;
+  // сначала свободный слот НУЖНОГО вида: геометрия у видов разная
+  for(let i=0;i<WPN_stuck.length;i++)
+    if(WPN_stuck[i].life<=0 && WPN_stuck[i].kind===a.id){ s = WPN_stuck[i]; break; }
+  if(!s && WPN_stuck.length < WPN_STICK_MAX){
+    s = { g:WPN_arrowMesh(a), kind:a.id, q0:new THREE.Quaternion(), life:0 };
+    s.g.frustumCulled = false;
+    scene.add(s.g);
+    WPN_stuck.push(s);
+  }
+  if(!s){
+    // пул забит — забираем самую старую стрелу того же вида, иначе любую
+    for(let i=0;i<WPN_stuck.length;i++){
+      const c = WPN_stuck[i];
+      if(c.kind !== a.id) continue;
+      if(!s || c.life < s.life) s = c;
+    }
+    if(!s) return;
+  }
+  if(!s.g.parent) scene.add(s.g);
+  /* Остриё стрелы лежит в начале координат её модели, поэтому точка касания
+     и есть позиция: ни поправок на длину, ни «утопить в стену» не нужно —
+     древко само окажется снаружи, а наконечник в поверхности. */
+  s.g.position.copy(p);
+  WPN_v1.copy(p).add(dir);
+  s.g.lookAt(WPN_v1);
+  s.q0.copy(s.g.quaternion);
+  s.g.scale.setScalar(1);
+  s.g.visible = true;
+  s.life = WPN_STICK_LIFE;
+}
+function WPN_updateStuck(dt){
+  for(let i=0;i<WPN_stuck.length;i++){
+    const s = WPN_stuck[i];
+    if(s.life<=0) continue;
+    s.life -= dt;
+    if(s.life<=0){ s.g.visible = false; continue; }
+    // первые полсекунды древко дрожит — удар был сильный
+    const t = WPN_STICK_LIFE - s.life;
+    if(t < 0.5){
+      s.g.quaternion.copy(s.q0);
+      s.g.rotateOnAxis(WPN_AX_X, Math.sin(t*62)*0.055*(1-t/0.5));
+    }
+    // материал общий, поэтому гасим размером, как гильзы
+    if(s.life < 0.45) s.g.scale.setScalar(clamp(s.life/0.45, 0, 1));
+  }
+}
+function WPN_clearStuck(){
+  for(let i=0;i<WPN_stuck.length;i++){ WPN_stuck[i].life = 0; WPN_stuck[i].g.visible = false; }
 }
 
 /* Индекс типа боеприпаса по его дескриптору. Ищем в самом AMMO, а не по
@@ -443,6 +816,7 @@ function WPN_ammoIdx(a){
 function spawnBullet(from, dir, a, dmg, owner, chg){
   const v = WPN_visGet(a);
   const heavy = a.id==='frag';
+  const arrow = (a.arrow === true);
   const b = {
     pos: from.clone().addScaledVector(dir, 0.5),
     vel: dir.clone().multiplyScalar(a.v),
@@ -455,12 +829,20 @@ function spawnBullet(from, dir, a, dmg, owner, chg){
     g: CFG.bulletG*a.gMul, drag:a.drag, wm:a.windMul,
     start: from.clone(), trP: from.clone(), trT:0, roll: rnd(0,6.283),
     whiz:false,
+    /* Стрела — не трассер: у неё есть настоящая длина, и вытягивать её по
+       скорости нельзя, иначе по дуге не будет видно наклона древка.
+       arrow/dud заведены прямо в литерале, чтобы форма объекта у всех пуль
+       была одна: пуля рождается на горячем пути десятками. */
+    arrow, dud:false,
     // толстый медленный снаряд читается на трассе, тонкий матчевый — нет
-    w: heavy ? 2.4 : (a.id==='fire' ? 1.5 : 0.85),
-    gs: heavy ? 0.62 : (a.id==='fire' ? 0.52 : 0.34)
+    w: arrow ? 1 : (heavy ? 2.4 : (a.id==='fire' ? 1.5 : 0.85)),
+    gs: arrow ? (a.id==='flame' ? 0.40 : (a.id==='bomb' ? 0.26 : 0))
+              : (heavy ? 0.62 : (a.id==='fire' ? 0.52 : 0.34))
   };
-  v.mesh.scale.set(b.w, b.w, 1);
+  if(arrow) v.mesh.scale.setScalar(0.5);
+  else v.mesh.scale.set(b.w, b.w, 1);
   v.glow.scale.setScalar(b.gs);
+  v.glow.visible = b.gs > 0.001;      // у простой стрелы свечения нет вовсе
   v.mesh.position.copy(b.pos); v.glow.position.copy(b.pos);
   bullets.push(b);
   return b;
@@ -473,14 +855,21 @@ function WPN_trail(b, dt){
   b.trT -= dt;
   if(b.trT > 0) return;
   if(b.pos.distanceToSquared(b.start) < 12.25) return;
-  if(a.id==='fire'){
+  /* Почерк следа выбираем по СВОЙСТВАМ боеприпаса, а не по его имени:
+     зажигательный патрон и огненная стрела делают в воздухе одно и то же,
+     и держать для этого две одинаковые ветки по id — верный способ забыть
+     одну из них при следующем стволе. */
+  if(a.burnDps > 0){
     b.trT = 0.055;
     if(FX.magic) FX.magic(b.pos, 1, 0xff8b4a);
     else FX.burst(b.pos, 1, {mat:PMAT.fire, speed:0.8, life:0.45, size:0.06, s1:0.01, g:-1.4});
     if(FX.tracer) FX.tracer(b.trP, b.pos, a.trail, 0.09);
-  } else if(a.id==='frag'){
+  } else if(a.splashR > 0){
     b.trT = 0.075;
     FX.burst(b.pos, 1, {mat:PMAT.smoke, speed:0.7, life:0.85, size:0.09, s1:0.30, g:-0.8});
+  } else if(b.arrow){
+    // обычная стрела следа не оставляет: её и должно быть трудно заметить
+    b.trT = 0.25;
   } else {
     b.trT = (b.owner==='player') ? 0.045 : 0.065;
     if(FX.tracer) FX.tracer(b.trP, b.pos, a.trail, 0.06);
@@ -544,22 +933,39 @@ function updateBullets(dt){
 
     const m = b.mesh, gl = b.glow;
     m.position.copy(b.pos); gl.position.copy(b.pos);
+    /* Разворот по вектору скорости — каждый кадр и для всех. У пули это
+       мелочь, а у стрелы весь смысл: на дуге видно, как она задирает нос
+       на подъёме и клюёт вниз на нисходящей ветви. */
     m.lookAt(_t1.copy(b.pos).add(b.vel));
     if(b.a.id==='frag'){ b.roll += dt*9; m.rotateZ(b.roll); }   // тяжёлый снаряд кувыркается на трассе
     // на вылете пуля «разгоняется» визуально: у дула она почти не видна
     const fade = clamp(b.pos.distanceTo(b.start)/6, 0, 1);
-    const len = clamp(b.vel.length()*0.045, 0.6, 3.2);
-    m.scale.set(b.w*(0.35+0.65*fade), b.w*(0.35+0.65*fade), len);
-    gl.scale.setScalar(b.gs*(0.35+0.65*fade)*(b.a.id==='fire' ? (0.85+0.25*Math.sin(b.life*40)) : 1));
+    if(b.arrow){
+      // длина у стрелы своя, растягивать её по скорости нечестно
+      m.scale.setScalar(0.5 + 0.5*fade);
+    } else {
+      const len = clamp(b.vel.length()*0.045, 0.6, 3.2);
+      m.scale.set(b.w*(0.35+0.65*fade), b.w*(0.35+0.65*fade), len);
+    }
+    gl.scale.setScalar(b.gs*(0.35+0.65*fade)*(b.a.burnDps > 0 ? (0.85+0.25*Math.sin(b.life*40)) : 1));
     WPN_trail(b, dt);
   }
 }
 
+/* Роль боеприпаса — в его полях, а не в имени. Фугасный снаряд и взрывная
+   стрела ведут себя одинаково, зажигательный патрон и огненная стрела тоже;
+   разводить их по id значило бы дублировать каждую ветку на каждый ствол.
+   У самодельного дескриптора пули бота этих полей нет — и он честно
+   оказывается «обычным». */
+function WPN_isBlast(a){ return a.splashR > 0; }
+function WPN_isFire(a){ return a.burnDps > 0; }
+
 /* Крит есть только у типа с AMMO[i].crit === true и никогда у фугаса.
    Полный крит (гарантированное убийство) — ровно один, у матчевого:
-   зажигательный бьёт сильнее обычного, но добивает уже горением. */
+   зажигательный бьёт сильнее обычного, но добивает уже горением, а стрела
+   в голову удваивает свой и без того зависящий от натяга урон. */
 function WPN_headDamage(a, dmg){
-  if(a.id === 'frag' || a.crit !== true) return -1;
+  if(WPN_isBlast(a) || a.crit !== true) return -1;
   return a.id === 'match' ? 999 : dmg*2.2;
 }
 
@@ -568,8 +974,12 @@ function onBulletHit(b, kind, obj, part, pIn, n){
   const P = _hit.copy(pIn);
   if(n) _nrm.copy(n); else _nrm.set(0,1,0);
   const byPlayer = (b.owner === 'player');
-  const isFrag = (a.id === 'frag');
-  const isFire = (a.id === 'fire');
+  /* Сорвавшаяся с пальцев стрела остаётся стрелой по типу, но НИЧЕГО не
+     поджигает и не взрывает: наказание за плохой выстрел — потерянная
+     стрела, а не фугас под собственными ногами. */
+  const dud = (b.dud === true);
+  const isFrag = WPN_isBlast(a) && !dud;
+  const isFire = WPN_isFire(a) && !dud;
 
   if(kind==='enemy'){
     const hd = (part==='head') ? WPN_headDamage(a, b.dmg) : -1;
@@ -626,6 +1036,16 @@ function onBulletHit(b, kind, obj, part, pIn, n){
     if(isFire && typeof burnPlayer === 'function') burnPlayer(a.burnTime*a.burnDps);
   } else {
     if(!n) terrainN(P.x,P.z,_nrm);
+    /* Стрела втыкается и торчит: направление берём у самой пули ДО любых
+       вызовов FX — общие временные векторы там затираются без предупреждения. */
+    if(b.arrow){
+      WPN_v3.copy(b.vel);
+      if(WPN_v3.lengthSq() > 1e-6){
+        WPN_v3.normalize();
+        WPN_stickArrow(a, P, WPN_v3);
+        SFX.noise({dur:0.09, f:kind==='terrain'?340:900, f2:200, q:2.4, g:0.20*volOf(P), pan:panOf(P)});
+      }
+    }
     /* burst() с нормалью и push сам распознаёт попадание пули и уводит его в
        FX.impact(), а та кладёт след по типу поверхности. Свой FX.decal здесь
        не нужен: он давал вторую метку в той же точке и жёг пул декалей вдвое. */
