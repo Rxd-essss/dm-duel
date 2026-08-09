@@ -40,8 +40,8 @@ let RND_rim = null, RND_rim2 = null;
    Шов на границе теневой рамки (±30 м), из-за которого силу когда-то и
    снизили, лечится своим средством — рамка расширена и привязана к взгляду,
    см. ниже. */
-const RND_SUN_I = 0.60;
-const RND_SUN_NOSHADOW = 0.38;
+const RND_SUN_I = 0.34;
+const RND_SUN_NOSHADOW = 0.24;
 
 /* Потолок плотности пикселей. Сцена упирается во fill rate: ландшафт с
    receiveShadow, полноэкранное небо и много аддитивной прозрачности без
@@ -98,7 +98,7 @@ let RND_pixCap = 1.5;
    уже ПОСЛЕ тонмаппинга (порядок чанков в r128: tonemapping → encodings →
    fog), поэтому его цвет остаётся ровно тем, что задан.                    */
 const RND_TONE_G = 2.99;         // крутизна S-кривой; см. RND_setTone()
-let RND_exposure = 6.40;         // какая линейная яркость станет средне-серой
+let RND_exposure = 6.80;         // какая линейная яркость станет средне-серой
 /* Подменяем заглушку CustomToneMapping в общем чанке. Делается на верхнем
    уровне модуля, то есть заведомо до первой компиляции шейдеров: чанк
    разворачивается при сборке программы, а она случается в первом render(). */
@@ -184,6 +184,31 @@ function RND_ambRamp(sh){
       RND_AMB_Y0.toFixed(1) + ', ' + RND_AMB_Y1.toFixed(1) + ', vAmbY ) );');
 }
 
+/* ------------------- ОТДЕЛЬНАЯ ЭКСПОЗИЦИЯ ДЛЯ ОРУЖИЯ В РУКАХ -------------------
+   Сцена вида (vmScene) освещена своим ригом и под свою рабочую точку, а
+   тонмаппинг у неё общий с миром — это одна и та же настройка рендерера.
+   Пока мировая экспозиция стояла около 2, совпадение было случайным и никто
+   его не замечал. Когда мир поехал на 6.4, ОРУЖИЕ УЕХАЛО ВМЕСТЕ С НИМ и
+   выгорело в белое: сталь ствольной коробки (0x8d939b) выходила на экран
+   на 249 из 255, и винтовка превращалась в белую пластмассу. Заказчик
+   сформулировал это как «снайперка визуально сломалась».
+
+   Поэтому у вида теперь своя экспозиция, и мировую можно двигать свободно.
+   Ставится она на время одного вызова render(vmScene, vmCamera) — это
+   uniform, пересборки шейдеров нет, цена нулевая.
+
+   ВАЖНО НА БУДУЩЕЕ: любая правка RND_exposure требует ВЗГЛЯДА на кадр С
+   ОРУЖИЕМ. Замеры мира этого не показывают в принципе — оружие живёт в
+   другой сцене. */
+let RND_vmExposure = 2.60;
+function RND_setVmExposure(v){ RND_vmExposure = clamp(v, 0.6, 9.0); return RND_vmExposure; }
+/* Отрисовка сцены вида: своя экспозиция, потом обратно мировая. */
+function RND_renderViewmodel(){
+  renderer.toneMappingExposure = RND_TONE_OK ? RND_vmExposure : RND_vmExposure * 1.35;
+  renderer.render(vmScene, vmCamera);
+  renderer.toneMappingExposure = RND_TONE_OK ? RND_exposure : RND_exposure * 1.35;
+}
+
 /* Экспозиция — единственный «глобальный» рычаг яркости. Менять её после
    старта можно свободно: это uniform, пересборка шейдеров не нужна. */
 function RND_setExposure(v){
@@ -266,7 +291,7 @@ function initThree(){
      оно берётся из РАЗНОСТИ подмешивания у цели и стены за ней, а не из
      насыщенности дымки; зато дальний план перестал быть одноцветным пятном и
      ушёл в холод, а передний остался тёплым от ламп. */
-  scene.fog = new THREE.Fog(0x9aa0a6, 26, 250);
+  scene.fog = new THREE.Fog(0x6f7a85, 20, 190);
 
   camera = new THREE.PerspectiveCamera(80, W/H, 0.06, 900);
 
@@ -278,9 +303,9 @@ function initThree(){
   // сильнее мира нельзя. Замер: 174 тыс. пикселей модели в кадре 1280×720.
   vmScene = new THREE.Scene();
   vmCamera = new THREE.PerspectiveCamera(58, W/H, 0.01, 12);
-  vmScene.add(new THREE.HemisphereLight(0xdcefff, 0x53483a, 0.70));
-  const vl = new THREE.DirectionalLight(0xfff1d4, 1.48); vl.position.set(1.4,2.2,1.6); vmScene.add(vl);
-  const vl2 = new THREE.DirectionalLight(0x7cb4ea, 0.31); vl2.position.set(-1.6,0.6,-1.2); vmScene.add(vl2);
+  vmScene.add(new THREE.HemisphereLight(0xc6d6e4, 0x4a4238, 0.62));
+  const vl = new THREE.DirectionalLight(0xffeccd, 1.15); vl.position.set(1.4,2.2,1.6); vmScene.add(vl);
+  const vl2 = new THREE.DirectionalLight(0x6e93bd, 0.22); vl2.position.set(-1.6,0.6,-1.2); vmScene.add(vl2);
 
   world = new THREE.Group(); scene.add(world);
 
@@ -328,8 +353,8 @@ function initThree(){
      вниз, поверх и без того оранжевого альбедо. Заказчик это и назвал
      однообразием. Тепло в зале теперь идёт только оттуда, где для него есть
      видимая причина, — от настенных ламп. */
-  hemi = new THREE.HemisphereLight(0x8c9dad, 0x6f6a61, 1.15); scene.add(hemi);
-  sun = new THREE.DirectionalLight(0xfff2d8, RND_SUN_I);
+  hemi = new THREE.HemisphereLight(0x6d8298, 0x4a4a48, 0.85); scene.add(hemi);
+  sun = new THREE.DirectionalLight(0xdfe9ff, RND_SUN_I);
   sun.position.set(60,90,40); sun.castShadow = true;
   sun.shadow.mapSize.set(2048,2048);
   // Рамка тени сужена с ±46 до ±30 м. Солнце едет за игроком, поэтому карта
@@ -365,9 +390,9 @@ function initThree(){
      заводились: кайма на силуэте бойца против плоской стены. Вторая уведена в
      символические 0.16 как заполнение теневой стороны, чтобы отвернувшаяся от
      солнца грань не проваливалась в ноль. */
-  RND_rim = new THREE.DirectionalLight(0x9dc4ff, 0.42);
+  RND_rim = new THREE.DirectionalLight(0x9dc4ff, 0.30);
   RND_rim.position.set(-90,26,-34); scene.add(RND_rim);
-  RND_rim2 = new THREE.DirectionalLight(0x8fb0d8, 0.16);
+  RND_rim2 = new THREE.DirectionalLight(0x8fb0d8, 0.10);
   RND_rim2.position.set(90,18,40); scene.add(RND_rim2);
 
   LIGHTS.init();
@@ -635,7 +660,7 @@ const LIGHTS = {
      Лампа осталась отдельным тёплым огнём с короткой лужей, а общий уровень
      зала держат полусфера и контровые. Множитель выше 1.6 снова выносил
      ракурс у лампы за 180 из 255. */
-  mul: 2.60,        // постоянные источники карты
+  mul: 3.60,        // постоянные источники карты
   mulFlash: 1.50,   // разовые вспышки: дуло, взрыв, искра
   decay: 1.98,      // степень спада постоянных
   decayFlash: 2.0,  // у вспышки спад мягче — иначе удар не читается по сцене

@@ -277,7 +277,13 @@ function mkRifle(team, big){
   const teamM= MDL_cloth(team);
   const teamD= MDL_cloth((team>>1) & 0x7f7f7f);
   /* свечение */
-  const rune = MDL_lit(PAL.rune);
+  /* Руна на прикладе НЕ берёт PAL.rune (0x9be8ff): материал у неё
+     несветовой, то есть на экран она выходит своим цветом почти как есть, а
+     приклад в виде от первого лица стоит в двадцати сантиметрах от глаза.
+     На скриншоте это читалось ярко-голубой полосой поперёк ложи — самым
+     светлым пятном всего кадра. Тон приглушён до уровня, на котором руна
+     остаётся свечением по дереву, а не источником света. */
+  const rune = MDL_lit(0x4d8aa2);
   const runeD= MDL_lit(0x2f7f9e);
   const bore = MDL_lit(0x090a0b);
 
@@ -491,7 +497,10 @@ function mkRifle(team, big){
   });
 
   /* Линзы отдельными мешами: userData.lens по контракту — меш. */
-  const lensM = MDL_glow(0x9fd8ff, 0.85);
+  /* Линза тоже несветовая и тоже близко к глазу — при прежнем 0x9fd8ff
+     объектив читался белым кругом. Стекло должно быть тёмным с холодным
+     отблеском, иначе прицел выглядит фонариком. */
+  const lensM = MDL_glow(0x4f8299, 0.8);
   const lens = new THREE.Mesh(MDL_discG(0.042,12), lensM);
   lens.position.set(0,0.115,-0.356); lens.rotation.y = Math.PI;
   G.add(lens);

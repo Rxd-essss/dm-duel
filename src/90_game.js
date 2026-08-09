@@ -364,7 +364,8 @@ function loop(now){
   renderer.clear();
   renderer.render(scene, camera);
   renderer.clearDepth();
-  if(game.state==='play' && vmRoot && vmRoot.visible) renderer.render(vmScene, vmCamera);
+  // у оружия своя экспозиция — см. RND_renderViewmodel в 20_render.js
+  if(game.state==='play' && vmRoot && vmRoot.visible) RND_renderViewmodel();
 }
 
 /* --------------------------- КАЧЕСТВО КАРТИНКИ ---------------------------
