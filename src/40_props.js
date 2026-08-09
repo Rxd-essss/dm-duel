@@ -400,42 +400,75 @@ function PROP_mt(k){
   let m = PROP_MTC[k];
   if(m) return m;
   switch(k){
-    /* стены: вертикальная доска, два пояса по высоте */
-    /* Четыре тона доски. Три из них (wallE → wallU → wallT) идут поясами по
-       ярусам оболочки: шаг светлоты ~15 единиц яркости — этого хватает,
-       чтобы высота читалась по стене, и мало, чтобы посадить кадр. Брать в
-       низ самый тёмный wallD было заманчиво, но замер показал минус 10
-       единиц средней по всему залу, а читаемость силуэта на 100 м дороже
-       настроения (§10.6). wallD остался там, где он и уместен, — на низких
-       перегородках ворот и в тени под настилами. */
-    case 'wallD': m = toonT(0x7c4527,'wood',20,1); break;   // перегородки ворот
-    case 'wallE': m = toonT(0x8a5230,'wood',20,1); break;   // пояс яруса 0
-    case 'wallU': m = toonT(0x9c6238,'wood',20,1); break;   // пояс яруса 1
-    case 'wallT': m = toonT(0xb0764a,'wood',20,1); break;   // пояс ярусов 2–3
-    /* несущий брус и стойки */
-    case 'beam':  m = toonT(0x5e3820,'wood',0.6,3); break;
-    case 'beamL': m = toonT(0x855433,'wood',0.6,3); break;
-    /* настилы по ярусам */
-    case 'deck1': m = toonT(0x8d5c36,'plank',3,8); break;
-    case 'deck2': m = toonT(0xab7a4a,'plank',3,8); break;
-    case 'deck3': m = toonT(0xc59d66,'plank',3,8); break;
+    /* ------------------ ПЕРЕБОРКА ПАЛИТРЫ ПО СКРИНШОТУ ------------------
+       Заказчик: «всё слишком однообразно и стрёмно». Жалоба точная, и вина
+       не только на свете. Вся оболочка зала — стены, брус, настилы, ступени,
+       кровля, земля — была выкрашена в ОДИН оранжево-коричневый тон
+       (0x5e3820 … 0xc59d66): двенадцать материалов, у которых различалась
+       только светлота, а оттенок совпадал до пары градусов. Что бы ни делал
+       свет, кадр из такого набора выходит одноцветным.
+
+       Разделение теперь идёт не по светлоте, а по ПОРОДЕ поверхности, и у
+       каждой своя роль в чтении зала:
+
+         ОБОЛОЧКА (wall*) — старая обшивка, много лет под погодой: серо-бурая,
+           насыщенность урезана вдвое. Её в кадре больше всего, и именно она
+           обязана быть спокойной, иначе спорит со всем остальным.
+         КАРКАС (beam*) — пропитанный брус, почти чёрный. Это главный
+           графический рисунок зала: тёмная решётка стоек и балок по светлой
+           обшивке. Раньше брус был всего на треть темнее стены и в общей
+           каше не читался вовсе.
+         НАСТИЛЫ (deck*, step*) — свежий пиленый лес, и вот он ТЁПЛЫЙ. Тепло
+           в палитре осталось ровно там, где по нему ходят и куда смотрят.
+           Лестница ярусов по светлоте сохранена: 1 → 2 → 3 светлеют.
+         ЖЕЛЕЗО, КРОВЛЯ, ЗЕМЛЯ — уведены в холод. Кровля была теплее пола,
+           хотя это изнанка крыши; земля была оранжевой, хотя это земля.
+
+       Разброс по оттенку между самой холодной и самой тёплой поверхностью —
+       около 40°, было меньше 8°. Разброс по светлоте вырос с 1.9 до 3.4 раз. */
+    /* ОБОЛОЧКА: вертикальная доска, пояса по ярусам. Шаг светлоты сохранён —
+       высота по-прежнему читается по стене, — но оттенок уведён в серо-бурый. */
+    case 'wallD': m = toonT(0x4a3f36,'vplank',5,1); break;  // перегородки ворот
+    case 'wallE': m = toonT(0x554941,'vplank',5,1); break;  // пояс яруса 0
+    case 'wallU': m = toonT(0x655648,'vplank',5,1); break;  // пояс яруса 1
+    case 'wallT': m = toonT(0x796855,'vplank',5,1); break;  // пояс ярусов 2–3
+    /* КАРКАС: несущий брус и стойки — тёмная пропитка */
+    case 'beam':  m = toonT(0x312721,'wood',0.6,3); break;
+    case 'beamL': m = toonT(0x483a2d,'wood',0.6,3); break;
+    /* НАСТИЛЫ по ярусам: свежий тёплый лес */
+    case 'deck1': m = toonT(0x876138,'plank',3,8); break;
+    case 'deck2': m = toonT(0x9a7546,'plank',3,8); break;
+    case 'deck3': m = toonT(0x9f7f50,'plank',3,8); break;
     case 'plank': m = toonT(PAL.plank,'plank',2,1); break;
     case 'plankD':m = toonT(0x8a6440,'plank',2,1); break;
     /* Ступени маршей — в тон того яруса, КУДА марш ведёт. Это не украшение:
        игрок обязан понимать по картинке, куда его выведет лестница, а зал
        собран так, что тон и есть указатель высоты (§10.6). Повторы мельче,
        чем у настилов: ступень — метровая доска, а не пролёт. */
-    case 'step1': m = toonT(0x8d5c36,'plank',1,2); break;
-    case 'step2': m = toonT(0xab7a4a,'plank',1,2); break;
-    case 'step3': m = toonT(0xc59d66,'plank',1,2); break;
-    /* железо, решётка, кровля, земля */
+    case 'step1': m = toonT(0x876138,'plank',1,2); break;
+    case 'step2': m = toonT(0x9a7546,'plank',1,2); break;
+    case 'step3': m = toonT(0x9f7f50,'plank',1,2); break;
+    /* железо, решётка, кровля, земля — холодная половина палитры */
     case 'iron':  m = toonT(PAL.metalDk,'metal',1,1); break;
+    case 'ironL': m = toonT(0x9a9c98,'plate',1,1); break;   // светлый прокат: обвязка, косынки
     case 'rust':  m = toonT(PAL.rust,'rust',1,1); break;
-    case 'grate': m = toonT(0x8f887a,'metal',4,4); break;
-    case 'roof':  m = toonT(0x6c4530,'roof',8,4); break;
-    case 'dirt':  m = toonT(0x6f5335,'dirt',2,2); break;
+    case 'grate': m = toonT(0x787d7e,'grate',4,4); break;
+    case 'roof':  m = toonT(0x4a3d34,'roof',8,4); break;
+    case 'dirt':  m = toonT(0x50493d,'dirt',3,3); break;
     case 'cloth': m = toonT(0xbfb193,'cloth',2,2); break;
     case 'stone': m = toonT(0x7a7166,'stone',2,1); break;
+    /* ---- материалы баз: см. SAW_buildBase в 45_map.js ----
+       База обязана отличаться от зала не только флагом. Здесь кладка и
+       бетон — то есть НЕ дерево вовсе, — и по одному крашеному тону на
+       сторону. Тон стоит на оболочке базы, поэтому свою сторону видно
+       издалека, ещё до того как прочитаешь надпись. */
+    case 'castle':  m = toonT(0x5f5a51,'stone',3,1.6); break;  // кладка сруба
+    case 'castleD': m = toonT(0x45423d,'stone',3,1.6); break;  // цоколь и контрфорсы
+    case 'floorB':  m = toonT(0x3d3b37,'conc',5,5); break;     // бетонный пол базы
+    case 'paintR':  m = toonT(0x8e3a34,'plate',2,2); break;    // крашеный лист RED
+    case 'paintB':  m = toonT(0x3f6480,'plate',2,2); break;    // и BLU
+    case 'trimR':   m = toonT(0xb8483c,'metal',1,1); break;    // обвязка ворот RED
+    case 'trimB':   m = toonT(0x4d7fa4,'metal',1,1); break;    // и BLU
     default:      m = toonT(PAL.plank,'plank',2,1);
   }
   PROP_MTC[k] = m;
@@ -571,24 +604,100 @@ function mkStair(bx,bz,tx,tz,w,y0,y1,opts){
   const dx = tx-bx, dz = tz-bz, len = Math.hypot(dx,dz);
   const yaw = Math.atan2(-dz, dx);
   const bm = opts.beamMat || PROP_mt('beam');
-  // косоуры: по одному вдоль каждой кромки, наклон изображаем ступенчато —
-  // три звена на марш, глазу этого хватает, а мешей в разы меньше
-  const K = 3;
+  const im = PROP_mt('iron');
+  const rise = y1 - y0, slope = rise/Math.max(len, 0.001);
+  const half = w/2 + 0.14;
+
+  /* ------------------ ЛЕСТНИЦЫ: ДОРАБОТКА ПО ЖАЛОБЕ ЗАКАЗЧИКА ------------------
+     «Лестницы слабо проработаны» — и это было правдой буквально: марш состоял
+     из парящих ступеней, трёх ступенчатых огрызков косоура и голых столбиков
+     ПЕРИЛ БЕЗ САМИХ ПЕРИЛ. Столбик, который никуда не ведёт, читается не как
+     ограждение, а как забытая палка, и весь марш из-за этого выглядел
+     недостроенным.
+
+     Добавлено ровно то, из чего лестница и состоит:
+       * поручень — наклонная нить поверх столбиков, звеньями по пролётам;
+       * подперильная тяга на середине высоты;
+       * подступёнок под каждой ступенью, чтобы марш не просвечивал насквозь;
+       * нависание проступи с тёмной кромкой — по нему ступень читается сбоку;
+       * опорная стойка под серединой косоура — марш перестал висеть в воздухе.
+     Ничего из этого не сплошное: коллизию по-прежнему держит рампа (§9), и
+     проход ПОД лестницей, ради которого зал и строился, остался открыт. */
+
+  // косоуры: звеньев больше (наклон читается ровнее), плюс железные накладки
+  const K = Math.max(4, Math.min(8, Math.round(len/1.8)));
   for(const s of [-1,1]) for(let i=0;i<K;i++){
-    const u0 = i*len/K, u1 = (i+1)*len/K;
-    const yy = y0 + (y1-y0)*(u0+u1)*0.5/len;
-    blk(PROP_wx(bx,yaw,(u0+u1)/2, s*(w/2+0.14)), yy-0.55,
-        PROP_wz(bz,yaw,(u0+u1)/2, s*(w/2+0.14)), len/K+0.05, 0.45, 0.22, bm, yaw, false, true);
+    const u0 = i*len/K, u1 = (i+1)*len/K, um = (u0+u1)/2;
+    const yy = y0 + rise*um/len;
+    blk(PROP_wx(bx,yaw,um, s*half), yy-0.55, PROP_wz(bz,yaw,um, s*half),
+        len/K+0.06, 0.46, 0.22, bm, yaw, false, true);
   }
+  // опорная стойка под серединой марша: от косоура до того, что под ним
+  for(const s of [-1,1]){
+    const um = len*0.5;
+    const px = PROP_wx(bx,yaw,um, s*half), pz = PROP_wz(bz,yaw,um, s*half);
+    const yy = y0 + rise*0.5 - 0.78;
+    const bot = gh(px,pz);
+    if(yy - bot > 0.6 && yy - bot < 9)
+      blk(px, (yy+bot)/2, pz, 0.2, yy-bot, 0.2, bm, yaw, false, true);
+  }
+  /* НОСОК ПРОСТУПИ — тёмная кромка по переднему краю каждой ступени.
+     Подступёнок сюда просился, но его тут быть НЕ ДОЛЖНО: марш нарочно
+     сквозной, сквозь него видно и стреляется, а сплошная с виду доска, через
+     которую летит пуля, врёт игроку (§0.9). Носок даёт ступени толщину и
+     тень, ничего при этом не закрывая. */
+  if(opts.nose !== false){
+    const nSt = Math.max(2, Math.ceil(rise/0.44));
+    const st = rise/nSt, run = len/nSt;
+    for(let i=0;i<nSt;i++){
+      const o2 = i*run + 0.02;
+      blk(PROP_wx(bx,yaw,o2,0), y0 + (i+1)*st - 0.19, PROP_wz(bz,yaw,o2,0),
+          0.07, 0.20, w-0.04, bm, yaw, false, true);
+    }
+  }
+
   if(opts.rail !== false){
     const R = Math.max(2, Math.round(len/2.6));
+    const post = [];
     for(let i=0;i<=R;i++){
-      const u = i*len/R, yy = y0 + (y1-y0)*u/len;
+      const u = i*len/R, yy = y0 + rise*u/len;
+      post.push({u:u, y:yy});
       for(const s of [-1,1])
-        blk(PROP_wx(bx,yaw,u,s*(w/2+0.14)), yy, PROP_wz(bz,yaw,u,s*(w/2+0.14)), 0.13, 1.0, 0.13, bm, yaw, false, true);
+        blk(PROP_wx(bx,yaw,u,s*half), yy+0.02, PROP_wz(bz,yaw,u,s*half), 0.13, 1.04, 0.13, bm, yaw, false, true);
+    }
+    /* Поручень и тяга. Звено наклонено на угол марша — иначе поверх столбиков
+       ляжет ступенчатая гребёнка, а это ровно та небрежность, на которую
+       заказчик и жалуется. Наклон даём поворотом вокруг поперечной оси, для
+       чего blk принимает ось: см. PROP_tilt ниже. */
+    const seg = len/R, hyp = Math.hypot(seg, rise*seg/len);
+    for(let i=0;i<R;i++){
+      const um = (i+0.5)*len/R, yy = y0 + rise*um/len;
+      for(const s of [-1,1]){
+        PROP_tilt(PROP_wx(bx,yaw,um,s*half), yy+0.52, PROP_wz(bz,yaw,um,s*half),
+                  hyp+0.04, 0.10, 0.13, bm, yaw, slope);     // поручень
+        PROP_tilt(PROP_wx(bx,yaw,um,s*half), yy+0.02, PROP_wz(bz,yaw,um,s*half),
+                  hyp+0.04, 0.07, 0.09, im, yaw, slope);     // тяга
+      }
     }
   }
   return ok;
+}
+
+/* Наклонное звено: тот же blk, но с доворотом вокруг поперечной оси. Нужен
+   поручням и подкосам — всему, что идёт вдоль наклонной, а не по горизонтали.
+   В отличие от blk координата y здесь — ЦЕНТР, а не низ: у наклонного бруса
+   «низа» нет. Тела не создаёт никогда: наклонную коллизию держит рампа (§9).
+   Порядок поворотов YZX обязателен — сначала разворот марша по азимуту, и уже
+   в его системе наклон; при обычном XYZ поручень уезжает вбок. */
+function PROP_tilt(x,y,z,sx,sy,sz,mat,yaw,slope){
+  const m = new THREE.Mesh(new THREE.BoxGeometry(sx,sy,sz), mat);
+  m.position.set(x,y,z);
+  m.rotation.order = 'YZX';
+  m.rotation.y = yaw || 0;
+  m.rotation.z = Math.atan(slope || 0);
+  m.castShadow = false; m.receiveShadow = true;
+  world.add(m);
+  return m;
 }
 
 /* Помост / настил на стойках. Пол — ровно yTop.
@@ -858,7 +967,7 @@ function mkWard(x, y0, z, len, h, yaw, col){
      него упираешься, а не закрывать полкарты в прицеле. */
   const vm = new THREE.MeshBasicMaterial({
     map: TEX.get('runeglow', PROP_rep(len/5.5), PROP_rep(h/5.5)), color: col,
-    transparent:true, opacity:0.085, blending:THREE.AdditiveBlending,
+    transparent:true, opacity:0.055, blending:THREE.AdditiveBlending,
     depthWrite:false, side:THREE.DoubleSide });
   const v = new THREE.Mesh(new THREE.PlaneGeometry(len-0.6, h-0.4), vm);
   v.position.set(x, y0 + h/2, z); v.rotation.y = yaw;
@@ -866,7 +975,7 @@ function mkWard(x, y0, z, len, h, yaw, col){
   world.add(v);
   // и светит она тоже вполсилы: это метка створа, а не источник освещения зала
   const lh = LIGHTS.addStatic(V(x, y0 + h*0.22, z), col, 0.34, 11);
-  PROP_WARDS.push({ mat:vm, lh, ph:rnd(0,6.283), base:0.34, op:0.085 });
+  PROP_WARDS.push({ mat:vm, lh, ph:rnd(0,6.283), base:0.34, op:0.055 });
   return v;
 }
 

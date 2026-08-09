@@ -56,10 +56,141 @@ function addBoxMesh(x,yBottom,z,sx,sy,sz,mat,yaw,solid,noShadow){
 const blk = addBoxMesh;
 
 const _seg = { p:new THREE.Vector3(), n:new THREE.Vector3() };
-// луч (o, dir нормализован) против всех коробок; вернуть {t, nx,ny,nz} или null
+
+/* ------------------------ ШИРОКАЯ ФАЗА ДЛЯ ЛУЧЕЙ ------------------------
+   Почему появилась. Заказчик: «сильно стало лагать» — и лагать стало ровно
+   с появлением лука. Причина прямая: rayBoxes перебирал ВСЕ коробки карты
+   (их около четырёхсот) на каждый вызов, а вызовов у снаряда четыре за кадр
+   (подшаги интегратора). Пуля летит 300 м/с и живёт доли секунды; стрела
+   летит 112 м/с, темп стрельбы вдвое чаще, залп утраивает выстрел, и лучники
+   есть у ботов — в воздухе одновременно оказывается на порядок больше
+   снарядов. Десяток стрел — это уже миллисекунда с лишним чистого JS в кадре
+   на одном только переборе коробок, и это помимо линий видимости ботов,
+   которые ходят через тот же rayBoxes.
+
+   Что сделано. Равномерная сетка по XZ (высоту не учитываем: зал 23 м, и
+   разделение по Y дало бы ячейки, где лежат почти все коробки сразу). Каждая
+   коробка попадает в те ячейки, которые накрывает её AABB. Луч идёт по сетке
+   алгоритмом DDA и проверяет только те коробки, что лежат в пройденных
+   ячейках; повторы отсекает штамп посещения, поэтому коробка, лежащая в
+   четырёх ячейках, считается один раз.
+
+   Договорённости, без которых это ломается:
+     * сетка строится ПОСЛЕ карты (PHYS_buildGrid из boot); до постройки и при
+       любой неудаче rayBoxes работает как раньше — полным перебором;
+     * коробки, добавленные ПОСЛЕ постройки сетки, в неё не попадают, поэтому
+       хвост списка (индексы от PHYS_G.n и дальше) проверяется линейно всегда.
+       Их единицы, и это дешевле, чем перестраивать сетку на каждую;
+     * ячейка 9 м выбрана по габаритам зала: 44 × 134 м дают 6 × 16 клеток.
+       Мельче — растёт стоимость самого DDA на длинном простреле в 130 м. */
+let PHYS_G = null;
+const PHYS_CELL = 9;
+
+function PHYS_buildGrid(){
+  const n = BOXES.length;
+  if(!n) return null;
+  let x0=Infinity, z0=Infinity, x1=-Infinity, z1=-Infinity;
+  for(let i=0;i<n;i++){
+    const b = BOXES[i];
+    if(b.aMin.x<x0) x0=b.aMin.x; if(b.aMax.x>x1) x1=b.aMax.x;
+    if(b.aMin.z<z0) z0=b.aMin.z; if(b.aMax.z>z1) z1=b.aMax.z;
+  }
+  const nx = Math.max(1, Math.ceil((x1-x0)/PHYS_CELL)), nz = Math.max(1, Math.ceil((z1-z0)/PHYS_CELL));
+  if(nx*nz > 20000) return null;              // подстраховка от абсурдной карты
+  const cells = new Array(nx*nz);
+  for(let i=0;i<nx*nz;i++) cells[i] = null;
+  for(let i=0;i<n;i++){
+    const b = BOXES[i];
+    const ix0 = clamp(Math.floor((b.aMin.x-x0)/PHYS_CELL), 0, nx-1);
+    const ix1 = clamp(Math.floor((b.aMax.x-x0)/PHYS_CELL), 0, nx-1);
+    const iz0 = clamp(Math.floor((b.aMin.z-z0)/PHYS_CELL), 0, nz-1);
+    const iz1 = clamp(Math.floor((b.aMax.z-z0)/PHYS_CELL), 0, nz-1);
+    for(let iz=iz0; iz<=iz1; iz++) for(let ix=ix0; ix<=ix1; ix++){
+      const k = iz*nx+ix;
+      if(cells[k] === null) cells[k] = [];
+      cells[k].push(i);
+    }
+  }
+  PHYS_G = { x0, z0, nx, nz, cells, n,
+             stamp:new Int32Array(n), mark:0 };
+  return PHYS_G;
+}
+
+// луч (o, dir нормализован) против всех коробок; вернуть {t, n} или null
 function rayBoxes(o, d, maxT){
-  let bt = maxT, bn = null;
-  for(let i=0;i<BOXES.length;i++){
+  const G = PHYS_G;
+  if(!G) return PHYS_rayRange(o, d, maxT, 0, BOXES.length, null);
+  // хвост: коробки, появившиеся после постройки сетки, — всегда линейно
+  let r = (BOXES.length > G.n) ? PHYS_rayRange(o, d, maxT, G.n, BOXES.length, null) : null;
+  if(r) maxT = r.t;
+
+  const cell = PHYS_CELL, nx = G.nx, nz = G.nz;
+  let ix = Math.floor((o.x - G.x0)/cell), iz = Math.floor((o.z - G.z0)/cell);
+  // старт вне сетки: доводим луч до её границы, иначе DDA стартовать неоткуда
+  let t = 0;
+  if(ix<0 || ix>=nx || iz<0 || iz>=nz){
+    const bx0 = G.x0, bx1 = G.x0 + nx*cell, bz0 = G.z0, bz1 = G.z0 + nz*cell;
+    let te = 0, tl = maxT;
+    if(Math.abs(d.x) > 1e-8){
+      let a=(bx0-o.x)/d.x, b=(bx1-o.x)/d.x; if(a>b){ const q=a;a=b;b=q; }
+      if(a>te) te=a; if(b<tl) tl=b;
+    } else if(o.x<bx0 || o.x>bx1) return r;
+    if(Math.abs(d.z) > 1e-8){
+      let a=(bz0-o.z)/d.z, b=(bz1-o.z)/d.z; if(a>b){ const q=a;a=b;b=q; }
+      if(a>te) te=a; if(b<tl) tl=b;
+    } else if(o.z<bz0 || o.z>bz1) return r;
+    if(te > tl || te > maxT) return r;
+    t = te + 1e-4;
+    ix = clamp(Math.floor((o.x + d.x*t - G.x0)/cell), 0, nx-1);
+    iz = clamp(Math.floor((o.z + d.z*t - G.z0)/cell), 0, nz-1);
+  }
+
+  const sx = d.x > 0 ? 1 : -1, sz = d.z > 0 ? 1 : -1;
+  const invx = Math.abs(d.x) > 1e-8 ? 1/d.x : 0, invz = Math.abs(d.z) > 1e-8 ? 1/d.z : 0;
+  let tMaxX = invx ? ((G.x0 + (ix + (sx>0?1:0))*cell) - o.x)*invx : Infinity;
+  let tMaxZ = invz ? ((G.z0 + (iz + (sz>0?1:0))*cell) - o.z)*invz : Infinity;
+  const tDx = invx ? Math.abs(cell*invx) : Infinity;
+  const tDz = invz ? Math.abs(cell*invz) : Infinity;
+
+  const mark = ++G.mark, stamp = G.stamp, cells = G.cells;
+  let best = r, bt = maxT;
+  let guard = nx + nz + 4;                    // клеток по прямой больше не бывает
+  while(guard-- > 0){
+    const list = cells[iz*nx + ix];
+    if(list){
+      const hit = PHYS_rayList(o, d, bt, list, stamp, mark);
+      if(hit){ best = hit; bt = hit.t; }
+    }
+    /* Выход, как только пройденная часть луча длиннее найденного попадания:
+       дальше по клеткам искать нечего — там всё за спиной у ближайшего.
+       Это и есть главный выигрыш на длинном простреле. */
+    const tNext = tMaxX < tMaxZ ? tMaxX : tMaxZ;
+    if(tNext >= bt || tNext >= maxT) break;
+    if(tMaxX < tMaxZ){ ix += sx; tMaxX += tDx; if(ix<0 || ix>=nx) break; }
+    else             { iz += sz; tMaxZ += tDz; if(iz<0 || iz>=nz) break; }
+  }
+  return best;
+}
+
+/* Общий внутренний перебор. Вынесен из rayBoxes без изменения математики:
+   тот же OBB-тест, что был, только источник индексов разный — диапазон
+   (для хвоста и для отката) или список ячейки (для сетки). */
+function PHYS_rayRange(o, d, maxT, from, to){
+  return PHYS_rayCore(o, d, maxT, null, from, to, null, 0);
+}
+function PHYS_rayList(o, d, maxT, list, stamp, mark){
+  return PHYS_rayCore(o, d, maxT, list, 0, list.length, stamp, mark);
+}
+/* Цикл развёрнут по осям намеренно. Прежняя запись собирала на КАЖДУЮ коробку
+   три временных массива (O, D, Hh) — то есть три выделения памяти на итерацию
+   в самом горячем цикле игры. При четырёх сотнях коробок и десятке снарядов
+   это тысячи мусорных объектов за кадр и регулярные паузы сборщика поверх и
+   без того дорогого перебора. Математика не изменилась ни на знак. */
+function PHYS_rayCore(o, d, maxT, list, from, to, stamp, mark){
+  let bt = maxT, nx0 = 0, ny0 = 0, nz0 = 0, got = false;
+  for(let k=from;k<to;k++){
+    const i = list ? list[k] : k;
+    if(stamp){ if(stamp[i] === mark) continue; stamp[i] = mark; }
     const b = BOXES[i];
     // грубая отбраковка по AABB
     if(o.x < b.aMin.x && d.x<=0 && o.x+d.x*maxT < b.aMin.x) continue;
@@ -70,26 +201,49 @@ function rayBoxes(o, d, maxT){
     if(o.z > b.aMax.z && d.z>=0 && o.z+d.z*maxT > b.aMax.z) continue;
     const ox = b.lx(o.x,o.z), oz = b.lz(o.x,o.z), oy = o.y-b.c.y;
     const dx = d.x*b.co - d.z*b.si, dz = d.x*b.si + d.z*b.co, dy = d.y;
-    let t0=0, t1=bt, axis=-1, sgn=1;
-    const O=[ox,oy,oz], D=[dx,dy,dz], Hh=[b.hx,b.hy,b.hz];
-    let ok = true;
-    for(let a=0;a<3;a++){
-      if(Math.abs(D[a]) < 1e-8){ if(Math.abs(O[a]) > Hh[a]){ ok=false; break; } continue; }
-      const inv = 1/D[a];
-      let ta = (-Hh[a]-O[a])*inv, tb = (Hh[a]-O[a])*inv, s=-1;
+    let t0=0, t1=bt, axis=-1, sgn=1, ok=true;
+    // X
+    if(dx < 1e-8 && dx > -1e-8){ if(ox > b.hx || ox < -b.hx) ok = false; }
+    else {
+      const inv = 1/dx;
+      let ta = (-b.hx-ox)*inv, tb = (b.hx-ox)*inv, s=-1;
       if(ta>tb){ const q=ta; ta=tb; tb=q; s=1; }
-      if(ta>t0){ t0=ta; axis=a; sgn=s; }
+      if(ta>t0){ t0=ta; axis=0; sgn=s; }
       if(tb<t1) t1=tb;
-      if(t0>t1){ ok=false; break; }
+      if(t0>t1) ok = false;
+    }
+    // Y
+    if(ok){
+      if(dy < 1e-8 && dy > -1e-8){ if(oy > b.hy || oy < -b.hy) ok = false; }
+      else {
+        const inv = 1/dy;
+        let ta = (-b.hy-oy)*inv, tb = (b.hy-oy)*inv, s=-1;
+        if(ta>tb){ const q=ta; ta=tb; tb=q; s=1; }
+        if(ta>t0){ t0=ta; axis=1; sgn=s; }
+        if(tb<t1) t1=tb;
+        if(t0>t1) ok = false;
+      }
+    }
+    // Z
+    if(ok){
+      if(dz < 1e-8 && dz > -1e-8){ if(oz > b.hz || oz < -b.hz) ok = false; }
+      else {
+        const inv = 1/dz;
+        let ta = (-b.hz-oz)*inv, tb = (b.hz-oz)*inv, s=-1;
+        if(ta>tb){ const q=ta; ta=tb; tb=q; s=1; }
+        if(ta>t0){ t0=ta; axis=2; sgn=s; }
+        if(tb<t1) t1=tb;
+        if(t0>t1) ok = false;
+      }
     }
     if(!ok || t0<=0 || t0>=bt) continue;
-    bt = t0;
-    if(axis===0) bn = [sgn*b.co, 0, -sgn*b.si];
-    else if(axis===1) bn = [0,sgn,0];
-    else bn = [sgn*b.si, 0, sgn*b.co];
+    bt = t0; got = true;
+    if(axis===0){ nx0 = sgn*b.co; ny0 = 0; nz0 = -sgn*b.si; }
+    else if(axis===1){ nx0 = 0; ny0 = sgn; nz0 = 0; }
+    else { nx0 = sgn*b.si; ny0 = 0; nz0 = sgn*b.co; }
   }
-  if(bn===null) return null;
-  _seg.n.set(bn[0],bn[1],bn[2]);
+  if(!got) return null;
+  _seg.n.set(nx0, ny0, nz0);
   return { t:bt, n:_seg.n };
 }
 // пересечение луча с ландшафтом (маршевый поиск + бисекция)

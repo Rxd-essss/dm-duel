@@ -23,6 +23,8 @@ let PLR_climbLock = 0, PLR_zipLock = 0;
 let PLR_zipT = 0, PLR_zipDir = 1, PLR_zipSnd = 0;
 let PLR_climbSnd = 0, PLR_prevY = 0;
 let PLR_pushT = 0, PLR_mantleTry = 0;
+// рабочие векторы для наводки теневой рамки — заводятся один раз, не в кадре
+const PLR_sunAim = new THREE.Vector3(), PLR_sunFwd = new THREE.Vector3();
 let PLR_lastX = 0, PLR_lastY = 0, PLR_lastZ = 0;   // куда паркур поставил игрока в прошлый кадр
 let PLR_qHeld = false;
 let PLR_dashX = 0, PLR_dashZ = 0;
@@ -573,8 +575,20 @@ function updateCamera(dt){
   if(add !== 0 || PLR_fovAdd !== 0){ camera.fov += add; camera.updateProjectionMatrix(); }
   PLR_fovAdd = add; PLR_fovSet = camera.fov;
 
-  // солнце ходит за игроком, чтобы тени были чёткими
-  sun.position.set(player.pos.x+55, player.pos.y+82, player.pos.z+38);
-  sun.target.position.copy(player.pos); sun.target.updateMatrixWorld();
+  /* Солнце ходит за игроком, чтобы тени были чёткими. Цель сдвинута ВПЕРЁД по
+     взгляду: рамка теневой камеры конечна (±44 м), и центрировать её строго на
+     игроке значило тратить заднюю половину на то, чего он не видит. На длинном
+     пролёте это читалось швом — ближняя часть зала в тени кровли, дальняя
+     залита солнцем, потому что дальше рамки тень просто не считается.
+     Смещение вперёд на 18 м переносит рамку на видимую половину; больше брать
+     нельзя, иначе тень под ногами уходит за её край. */
+  PLR_sunAim.copy(player.pos);
+  if(camera){
+    camera.getWorldDirection(PLR_sunFwd);
+    PLR_sunFwd.y = 0;
+    if(PLR_sunFwd.lengthSq() > 1e-4) PLR_sunAim.addScaledVector(PLR_sunFwd.normalize(), 18);
+  }
+  sun.position.set(PLR_sunAim.x+55, player.pos.y+82, PLR_sunAim.z+38);
+  sun.target.position.copy(PLR_sunAim); sun.target.updateMatrixWorld();
   if(skyMesh) skyMesh.position.copy(camera.position);
 }

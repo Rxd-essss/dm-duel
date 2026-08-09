@@ -328,6 +328,12 @@
         <div class="opt"><span style="width:150px">Обзор (FOV)</span><input type="range" id="optFov" min="65" max="105" value="80"><span class="v" id="vFov">80</span></div>
         <div class="opt"><span style="width:150px">Громкость</span><input type="range" id="optVol" min="0" max="100" value="70"><span class="v" id="vVol">70</span></div>
         <div class="opt"><span style="width:150px">Тени</span><input type="range" id="optSh" min="0" max="2" value="2"><span class="v" id="vSh">выс</span></div>
+        <!-- Ступень качества. Код на неё был (setQuality в 90_game.js, ищет
+             #optQ и [data-q]), а самой ручки в разметке не существовало —
+             поэтому плотность пикселей навсегда стояла на 1.5, и на слабой
+             машине снизить её было нечем. Отсюда «сильно стало лагать» без
+             всякой возможности что-то сделать. -->
+        <div class="opt"><span style="width:150px">Качество</span><input type="range" id="optQ" min="0" max="2" value="2"><span class="v" id="vQ">высокое</span></div>
         <h2 class="sec s2">Сложность</h2>
         <div class="seg" id="diffSeg2">
           <button data-d="easy">НОВОБРАНЕЦ</button><button data-d="normal" class="on">СНАЙПЕР</button><button data-d="hard">ЛЕГЕНДА</button>
