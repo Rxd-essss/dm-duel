@@ -206,6 +206,30 @@ function buildViewmodel(){
   WPN_vmLight.position.set(0.12,-0.16,-1.25);
   vmScene.add(WPN_vmLight);
 
+  /* ЧИСТКА МОДЕЛИ В РУКАХ.
+     На снимке заказчика в кадре висели «2 больших синих куба»: четыре меша
+     габаритом 1.17…1.72 м с БЕЛЫМ материалом, тогда как все настоящие детали
+     винтовки укладываются в 0.29 м. Белое под холодной подсветкой сцены вида
+     (синяя заполняющая) и читается светло-голубыми плитами поперёк экрана.
+     Это брак сборщика модели, а не оружия: деталь такого размера в руках
+     существовать не может. Выкидываем по двум признакам сразу — заведомо
+     негабаритная И некрашеная, — чтобы под нож не попала честная крупная
+     часть вроде ремня, у которой есть цвет из палитры. */
+  (function(){
+    const bb = new THREE.Box3(), sz = new THREE.Vector3(), junk = [];
+    vmRifle.traverse(o => {
+      if(!o.isMesh || !o.geometry) return;
+      if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      o.updateWorldMatrix(true, false);
+      bb.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);
+      bb.getSize(sz);
+      const white = o.material && o.material.color && o.material.color.getHex() === 0xffffff;
+      if(Math.max(sz.x, sz.y, sz.z) > 0.6 && white) junk.push(o);
+    });
+    for(const o of junk){ if(o.parent) o.parent.remove(o); }
+    if(junk.length) console.warn('модель винтовки: убрано негабаритных белых деталей —', junk.length);
+  })();
+
   /* линзу прицела вида отвязываем от общего материала: ниже мы крутим
      её прозрачность, и это не должно доставать до винтовок противника */
   if(vmRifle.userData && vmRifle.userData.lens && vmRifle.userData.lens.material)
